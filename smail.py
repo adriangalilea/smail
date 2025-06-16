@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""smail - Simple email client for iCloud"""
+"""smail - Simple email client for iCloud (v2 with clean data model)"""
 
 import imaplib
 import smtplib
@@ -16,28 +16,25 @@ import tomllib
 from pathlib import Path
 import json
 import time
+import traceback
+import inspect
+import re
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 from rich.tree import Tree
+from rich.table import Table
+from rich.prompt import Prompt
+from rich.rule import Rule
+from rich.padding import Padding
+from rich.box import SIMPLE
 
-# ANSI color codes
-class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
+# Global console instance
+console = Console()
 
 # Minimal beautiful assert with same API as assert
 def ensure(condition, message=""):
     if not condition:
-        import traceback
-        import inspect
         
         # Get the calling frame
         frame = inspect.currentframe().f_back
@@ -54,14 +51,13 @@ def ensure(condition, message=""):
         short_filename = os.path.basename(filename)
         
         # Extract the condition from the ensure call
-        import re
         match = re.search(r'ensure\((.*?),', source_line)
         condition_str = match.group(1) if match else source_line
         
         # Print beautiful error
-        print(f"\n{Colors.DIM}{short_filename}:{line_number}{Colors.ENDC}")
-        print(f"  {Colors.RED}{condition_str}{Colors.ENDC}")
-        print(f"  {Colors.RED}↳{Colors.ENDC} {message if message else 'assertion failed'}\n")
+        console.print(f"\n[dim]{short_filename}:{line_number}[/dim]")
+        console.print(f"  [red]{condition_str}[/red]")
+        console.print(f"  [red]↳[/red] {message if message else 'assertion failed'}\n")
         sys.exit(1)
 
 # iCloud defaults
@@ -85,92 +81,79 @@ def save_cache(display_items):
         json.dump(cache_data, f, indent=2)
 
 def load_cache():
-    """Load email data from cache"""
+    """Load display items from cache"""
     if not CACHE_PATH.exists():
         return None
     
     try:
         with open(CACHE_PATH) as f:
-            cache_data = json.load(f)
-        return cache_data
+            return json.load(f)
     except Exception:
         return None
 
-# Load configuration
+# Load config
+CONFIG_PATH = Path.home() / ".config" / "smail" / "config.toml"
+
 def load_config():
-    config_path = Path.home() / ".config" / "smail" / "config.toml"
-    
-    if not config_path.exists():
-        # Create config directory if needed
-        config_path.parent.mkdir(parents=True, exist_ok=True)
+    """Load configuration or guide through setup"""
+    if not CONFIG_PATH.exists():
+        console.print("[yellow]Setting up smail...[/yellow]\n")
         
-        # First time setup guidance
-        print(f"{Colors.BOLD}Welcome to smail!{Colors.ENDC}")
-        print(f"\nLet's set up your iCloud email.\n")
+        # Get email
+        email_addr = Prompt.ask("Enter your iCloud email")
+        ensure(email_addr, "Email cannot be empty")
+        ensure("@" in email_addr, "Invalid email format")
         
-        print(f"{Colors.DIM}You'll need:{Colors.ENDC}")
-        print("1. Your iCloud email address (e.g., user@icloud.com)")
-        print("2. Your Apple ID if different from your email")
-        print("3. An app-specific password from appleid.apple.com\n")
+        # Get Apple ID if different
+        console.print("\n[dim]Your Apple ID login might be different from your email.[/dim]")
+        console.print("[dim]For example: email is john@icloud.com but login is john.doe@icloud.com[/dim]")
+        login = Prompt.ask("\nApple ID login (press Enter if same as email)", default=email_addr)
         
-        # Get user input
-        email = input(f"{Colors.CYAN}Your iCloud email:{Colors.ENDC} ").strip()
-        ensure(email and "@" in email, "Invalid email address")
+        # Get keychain service name
+        console.print("\n[dim]smail uses macOS Keychain to store your app-specific password.[/dim]")
+        console.print("[dim]Choose a unique name for this keychain entry.[/dim]")
+        keychain = Prompt.ask("\nKeychain service name", default="smail-icloud")
         
-        login = input(f"{Colors.CYAN}Your Apple ID [{email}]:{Colors.ENDC} ").strip()
-        if not login:
-            login = email
-            
-        name = input(f"{Colors.CYAN}Your display name (optional):{Colors.ENDC} ").strip()
+        # Get display name
+        console.print("\n[dim]Your display name appears in emails you send.[/dim]")
+        name = Prompt.ask("\nDisplay name (optional)", default="")
         
-        keychain_name = email.split("@")[0] + "-smail"
-        
-        # Create config file
-        config_content = f'''email = "{email}"
+        # Save config
+        config = f"""email = "{email_addr}"
 login = "{login}"
-keychain = "{keychain_name}"'''
-        
+keychain = "{keychain}"
+"""
         if name:
-            config_content += f'\nname = "{name}"'
+            config += f'name = "{name}"\n'
         
-        with open(config_path, "w") as f:
-            f.write(config_content)
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(config)
         
-        # Guide for password setup
-        print(f"\n{Colors.GREEN}✓ Config created!{Colors.ENDC}")
-        print(f"\nNow let's save your app-specific password securely.")
-        print(f"{Colors.DIM}(Get one from https://appleid.apple.com → Sign-In and Security → App-Specific Passwords){Colors.ENDC}")
-        print(f"\nRun this command and paste your password when prompted:")
-        print(f"\n{Colors.YELLOW}security add-generic-password -a \"{login}\" -s \"{keychain_name}\" -w{Colors.ENDC}")
-        print(f"\n{Colors.DIM}This stores your password in macOS Keychain, not in any files.{Colors.ENDC}")
-        print(f"{Colors.DIM}smail retrieves it securely each time you use it.{Colors.ENDC}")
+        console.print(f"\n[green]✓ Config saved to {CONFIG_PATH}[/green]")
+        
+        # Guide to add password
+        console.print(f"\n[yellow]Next steps:[/yellow]")
+        console.print("1. Get an app-specific password from:")
+        console.print(f"   [cyan]https://appleid.apple.com[/cyan] → Sign-In and Security → App-Specific Passwords")
+        console.print("\n2. Add it to your keychain:")
+        console.print(f"   [bold]security add-generic-password -a \"{login}\" -s \"{keychain}\" -w[/bold]")
+        console.print("\n3. Run smail again!")
         sys.exit(0)
     
-    with open(config_path, "rb") as f:
-        config = tomllib.load(f)
-    
-    ensure("email" in config, "email required in config")
-    ensure("keychain" in config, "keychain required in config")
-    
-    # Set defaults
-    if "login" not in config:
-        config["login"] = config["email"]
-    
-    return config
+    with open(CONFIG_PATH, 'rb') as f:
+        return tomllib.load(f)
 
-# Load config
+# Load configuration
 config = load_config()
-
-# Configuration from file
-EMAIL = config["email"]
-LOGIN = config.get("login", EMAIL)
-KEYCHAIN_SERVICE = config["keychain"]
-NAME = config.get("name", "")  # Display name for emails
+EMAIL = config['email']
+LOGIN = config.get('login', EMAIL)
+KEYCHAIN_SERVICE = config.get('keychain', 'smail-icloud')
+NAME = config.get('name', '')
 
 def get_password():
     """Get password from macOS keychain"""
     result = subprocess.run(
-        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+        ['security', 'find-generic-password', '-a', LOGIN, '-s', KEYCHAIN_SERVICE, '-w'],
         capture_output=True, text=True
     )
     ensure(result.returncode == 0, f"""Password not found in keychain.
@@ -219,266 +202,205 @@ def format_date(date_str):
     else:
         return dt.strftime("%b %d")
 
-class ThreadNode:
-    """Represents a message in a thread tree"""
-    def __init__(self, message):
-        self.message = message
-        self.children = []
-        self.newest_date = parsedate_to_datetime(message['date'])
-        self.thread_id = None  # Will be assigned after tree is built
+def build_thread_index_map(messages):
+    """Build a map of message_id to thread index based on latest-first numbering"""
+    # Build parent-child relationships
+    id_to_msg = {m['message_id']: m for m in messages}
+    children_map = {}  # parent_id -> [child_messages]
     
-    def update_newest_date(self):
-        """Update newest_date based on children"""
-        dates = [self.newest_date]
-        for child in self.children:
-            child.update_newest_date()
-            dates.append(child.newest_date)
-        self.newest_date = max(dates)
-    
-    def sort_children_by_newest(self):
-        """Sort children by their newest date (newest last)"""
-        self.children.sort(key=lambda x: x.newest_date)
-        for child in self.children:
-            child.sort_children_by_newest()
-
-def assign_thread_ids(root):
-    """Assign thread IDs to all nodes based on newest activity in each branch"""
-    # First, assign root ID
-    root.thread_id = "0"
-    
-    # Recursive function to assign IDs to children
-    def assign_children_ids(parent):
-        if not parent.children:
-            return
-        
-        # Sort children by their newest_date (newest activity first)
-        children_sorted = sorted(parent.children, key=lambda x: x.newest_date, reverse=True)
-        
-        # Assign IDs
-        for i, child in enumerate(children_sorted):
-            child.thread_id = f"{parent.thread_id}.{i}"
-            # Recursively assign to grandchildren
-            assign_children_ids(child)
-    
-    assign_children_ids(root)
-
-def build_thread_tree(messages):
-    """Build a proper thread tree from messages"""
-    # Create nodes
-    nodes = {msg['message_id']: ThreadNode(msg) for msg in messages}
-    roots = []
-    
-    # Build tree structure
     for msg in messages:
+        parent_id = msg.get('in_reply_to', '')
+        if parent_id and parent_id in id_to_msg:
+            if parent_id not in children_map:
+                children_map[parent_id] = []
+            children_map[parent_id].append(msg)
+    
+    # Sort children by date (newest first)
+    for parent_id in children_map:
+        children_map[parent_id].sort(
+            key=lambda x: parsedate_to_datetime(x['date']), 
+            reverse=True
+        )
+    
+    # Find the absolute newest message in the thread
+    newest_msg = max(messages, key=lambda x: parsedate_to_datetime(x['date']))
+    
+    # Build the index map
+    index_map = {}
+    
+    def assign_indices(msg, parent_path=[]):
+        """Recursively assign indices with newest message getting .0 path"""
         msg_id = msg['message_id']
-        reply_to = msg['in_reply_to']
         
-        if reply_to and reply_to in nodes:
-            # Add as child to parent
-            nodes[reply_to].children.append(nodes[msg_id])
-        else:
-            # Root message
-            roots.append(nodes[msg_id])
+        # Get children sorted by date (newest first)
+        children = children_map.get(msg_id, [])
+        
+        # Check if any descendant is the newest message
+        def has_newest_descendant(m):
+            if m['message_id'] == newest_msg['message_id']:
+                return True
+            for child in children_map.get(m['message_id'], []):
+                if has_newest_descendant(child):
+                    return True
+            return False
+        
+        # Assign indices to children
+        for i, child in enumerate(children):
+            if has_newest_descendant(child):
+                # This branch contains the newest message, gets .0
+                child_path = parent_path + [0]
+            else:
+                # Other branches numbered by recency
+                child_path = parent_path + [i if has_newest_descendant(children[0]) else i + 1]
+            
+            index_map[child['message_id']] = child_path
+            assign_indices(child, child_path)
     
-    # Update newest dates and sort
+    # Find root message(s)
+    roots = [m for m in messages if not m.get('in_reply_to') or m['in_reply_to'] not in id_to_msg]
+    
+    # Assign index to root
     for root in roots:
-        root.update_newest_date()
-        root.sort_children_by_newest()
-        # Assign thread IDs
-        assign_thread_ids(root)
+        index_map[root['message_id']] = []  # Root has empty path (displays as "0")
+        assign_indices(root, [])
     
-    return roots
+    return index_map
 
-def flatten_thread_tree(root, result=None, depth=0):
-    """Flatten thread tree into display order with depth info"""
-    if result is None:
-        result = []
+def build_display_items(emails):
+    """Build display items with thread grouping"""
+    # Map message IDs to emails
+    id_to_email = {e['message_id']: e for e in emails}
     
-    result.append((root.message, depth))
-    
-    for child in root.children:
-        flatten_thread_tree(child, result, depth + 1)
-    
-    return result
-
-def build_threads(emails):
-    """Build thread relationships from email list"""
-    # First pass: build a map of message_id to email
-    msg_map = {e['message_id']: e for e in emails}
-    
-    # Second pass: find root for each message
     def find_root(msg_id, visited=None):
+        """Find the root message of a thread"""
         if visited is None:
             visited = set()
+        
         if msg_id in visited:
-            return msg_id  # Circular reference, use self as root
+            return msg_id
+        
         visited.add(msg_id)
         
-        if msg_id not in msg_map:
-            return msg_id  # Message not in our set
+        if msg_id not in id_to_email:
+            return msg_id
         
-        msg = msg_map[msg_id]
+        msg = id_to_email[msg_id]
         if not msg['in_reply_to']:
-            return msg_id  # This is a root
+            return msg_id
         
-        # Recurse to find ultimate root
         return find_root(msg['in_reply_to'], visited)
     
     # Group by thread root
     threads = {}
-    for email_data in emails:
-        root_id = find_root(email_data['message_id'])
+    for email in emails:
+        root_id = find_root(email['message_id'])
         if root_id not in threads:
             threads[root_id] = []
-        threads[root_id].append(email_data)
+        threads[root_id].append(email)
     
-    # Sort messages within each thread by date
-    for thread_id in threads:
-        threads[thread_id].sort(key=lambda x: parsedate_to_datetime(x['date']))
+    # Build display items
+    display_items = []
+    seen_messages = set()
     
-    return threads
-
-def list_emails(max_emails=20, expand_thread=None, display=True, from_cache=False):
-    """List emails to/from btmask@icloud.com with thread support"""
-    # If loading from cache for display
-    if from_cache and display:
-        cache_data = load_cache()
-        ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
-        
-        emails_data = cache_data['emails']
-        idx_mapping = cache_data['idx_mapping']
-        
-        # Rebuild threads from cache
-        threads = {}
-        for thread_id, email_ids in cache_data['threads'].items():
-            thread_emails = []
-            # Preserve order from the thread data
-            for email_id in email_ids:
-                for e in emails_data:
-                    if e['id'] == email_id:
-                        thread_emails.append(e)
-                        break
-            if thread_emails:
-                threads[thread_id] = thread_emails
-        
-        # Just display from cache
-        _display_emails(emails_data, threads, expand_thread, idx_mapping)
-        return idx_mapping
-    
-    # If just loading cache data without display (for read operations)
-    if not display:
-        cache_data = load_cache()
-        ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
-        return cache_data['idx_mapping']
-    
-    # Otherwise, fetch fresh data
-    password = get_password()
-    
-    # Connect to IMAP
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-    mail.login(LOGIN, password)
-    mail.select('INBOX')
-    
-    # Search for emails to/from our email
-    typ, to_data = mail.search(None, f'(TO "{EMAIL}")')
-    ensure(typ == 'OK', f"Search failed: {typ}")
-    to_ids = to_data[0].split() if to_data[0] else []
-    
-    typ, from_data = mail.search(None, f'(FROM "{EMAIL}")')
-    ensure(typ == 'OK', f"Search failed: {typ}")
-    from_ids = from_data[0].split() if from_data[0] else []
-    
-    # Combine and deduplicate
-    all_ids = list(set(to_ids + from_ids))
-    all_ids.sort(key=lambda x: int(x.decode() if isinstance(x, bytes) else x), reverse=True)
-    
-    # Limit number of emails
-    email_ids = all_ids[:max_emails]
-    
-    if not email_ids:
-        print(f"{Colors.DIM}No emails found{Colors.ENDC}")
-        return
-    
-    # Fetch all emails and extract threading info
-    emails_data = []
-    
-    for email_id in email_ids:
-        # email_id might be bytes
-        if isinstance(email_id, bytes):
-            email_id = email_id.decode()
-        
-        # Fetch email body and flags without marking as read
-        typ, msg_data = mail.fetch(email_id, '(FLAGS BODY.PEEK[])')
-        ensure(typ == 'OK', f"IMAP fetch failed: {typ}")
-        ensure(msg_data, "No message data returned")
-        ensure(len(msg_data) >= 1, f"Expected at least 1 item in msg_data, got {len(msg_data)}")
-        
-        # IMAP response handling
-        ensure(msg_data[0] is not None, f"Failed to fetch email {email_id}")
-        
-        # Parse FLAGS and BODY from response
-        flags = []
-        raw_email = None
-        
-        # The response contains FLAGS and BODY data
-        if isinstance(msg_data[0], tuple) and len(msg_data[0]) == 2:
-            # Response line and data
-            response_line = msg_data[0][0].decode() if isinstance(msg_data[0][0], bytes) else msg_data[0][0]
+    for email in emails:
+        if email['message_id'] in seen_messages:
+            continue
             
-            # Extract flags from response line
-            if 'FLAGS' in response_line:
-                import re
-                flags_match = re.search(r'FLAGS \(([^)]*)\)', response_line)
-                if flags_match:
-                    flags = flags_match.group(1).split()
+        root_id = find_root(email['message_id'])
+        thread_messages = threads[root_id]
+        
+        if len(thread_messages) > 1:
+            # Build thread indices for this thread
+            thread_indices = build_thread_index_map(thread_messages)
             
-            raw_email = msg_data[0][1]
+            # Thread
+            display_items.append({
+                "type": "thread",
+                "messages": thread_messages,
+                "thread_indices": thread_indices
+            })
+            for msg in thread_messages:
+                seen_messages.add(msg['message_id'])
         else:
-            # Fallback for unexpected format
-            raw_email = msg_data[0] if isinstance(msg_data[0], bytes) else msg_data[0][1]
+            # Single message
+            display_items.append({
+                "type": "single",
+                "message": email
+            })
+            seen_messages.add(email['message_id'])
+    
+    return display_items
+
+def list_emails(max_emails=20, from_cache=False):
+    """List emails with clean display"""
+    if from_cache:
+        cache_data = load_cache()
+        ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
+        display_items = cache_data['display_items']
+    else:
+        # Fetch fresh emails
+        password = get_password()
         
-        ensure(isinstance(raw_email, bytes), f"Expected bytes for email body, got {type(raw_email)}")
+        # Connect to IMAP
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        mail.login(LOGIN, password)
+        mail.select('INBOX')
         
-        # Check if email is read
-        is_read = '\\Seen' in flags
+        # Search for emails to/from our email
+        typ, to_data = mail.search(None, f'(TO "{EMAIL}")')
+        ensure(typ == 'OK', f"Search failed: {typ}")
+        to_ids = to_data[0].split() if to_data[0] else []
         
-        msg = email.message_from_bytes(raw_email)
+        typ, from_data = mail.search(None, f'(FROM "{EMAIL}")')
+        ensure(typ == 'OK', f"Search failed: {typ}")
+        from_ids = from_data[0].split() if from_data[0] else []
         
-        # Extract headers including threading
-        subject = decode_mime_string(msg.get('Subject') or 'No Subject')
-        from_addr = decode_mime_string(msg.get('From') or 'Unknown')
-        date = msg.get('Date')
-        message_id = msg.get('Message-ID', '').strip('<>')
-        in_reply_to = msg.get('In-Reply-To', '').strip('<>')
-        references = msg.get('References', '')
+        # Combine and deduplicate
+        all_ids = list(set(to_ids + from_ids))
+        all_ids.sort(key=lambda x: int(x.decode() if isinstance(x, bytes) else x), reverse=True)
         
-        # Handle incomplete emails (server still processing)
-        if not date:
-            print(f"{Colors.YELLOW}Waiting for server to process new messages...{Colors.ENDC}")
-            time.sleep(2)
+        # Limit number of emails
+        email_ids = all_ids[:max_emails]
+        
+        if not email_ids:
+            console.print("[dim]No emails found[/dim]")
+            return
+        
+        # Fetch all emails
+        emails_data = []
+        
+        for email_id in email_ids:
+            # email_id might be bytes
+            if isinstance(email_id, bytes):
+                email_id = email_id.decode()
             
-            # Retry fetching this specific email
+            # Fetch email body and flags
             typ, msg_data = mail.fetch(email_id, '(FLAGS BODY.PEEK[])')
-            ensure(typ == 'OK', f"IMAP retry fetch failed: {typ}")
+            ensure(typ == 'OK', f"IMAP fetch failed: {typ}")
+            ensure(msg_data, "No message data returned")
             
-            # Re-parse the message and flags
+            # Parse FLAGS and BODY from response
             flags = []
+            raw_email = None
+            
             if isinstance(msg_data[0], tuple) and len(msg_data[0]) == 2:
                 response_line = msg_data[0][0].decode() if isinstance(msg_data[0][0], bytes) else msg_data[0][0]
+                
+                # Extract flags
                 if 'FLAGS' in response_line:
-                    import re
                     flags_match = re.search(r'FLAGS \(([^)]*)\)', response_line)
                     if flags_match:
                         flags = flags_match.group(1).split()
+                
                 raw_email = msg_data[0][1]
             else:
                 raw_email = msg_data[0] if isinstance(msg_data[0], bytes) else msg_data[0][1]
             
-            is_read = '\\Seen' in flags
+            ensure(isinstance(raw_email, bytes), f"Expected bytes for email body")
             
             msg = email.message_from_bytes(raw_email)
             
-            # Re-extract headers
+            # Extract headers
             subject = decode_mime_string(msg.get('Subject') or 'No Subject')
             from_addr = decode_mime_string(msg.get('From') or 'Unknown')
             date = msg.get('Date')
@@ -486,191 +408,314 @@ def list_emails(max_emails=20, expand_thread=None, display=True, from_cache=Fals
             in_reply_to = msg.get('In-Reply-To', '').strip('<>')
             references = msg.get('References', '')
             
-            ensure(date, f"Email {email_id} incomplete after retry - server issue")
-        
-        # Clean up from address
-        if '<' in from_addr:
-            display_name = from_addr.split('<')[0].strip()
-            email_addr = from_addr.split('<')[1].split('>')[0]
-            if display_name and display_name != email_addr:
-                # Show both name and email
-                from_name = f"{display_name} ({email_addr})"
+            ensure(date, f"Email {email_id} has no date")
+            
+            # Clean up from address
+            if '<' in from_addr:
+                display_name = from_addr.split('<')[0].strip()
+                email_addr = from_addr.split('<')[1].split('>')[0]
+                if display_name and display_name != email_addr:
+                    from_name = display_name
+                else:
+                    from_name = email_addr
             else:
-                # Just show email if no name or they're the same
-                from_name = email_addr
-        else:
-            from_name = from_addr
-        
-        ensure(from_name, f"Could not extract from name from {from_addr}")
-        
-        # Extract body for caching
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    body = part.get_payload(decode=True).decode('utf-8', errors='replace')
-                    break
-        else:
-            body = msg.get_payload(decode=True).decode('utf-8', errors='replace')
-        
-        emails_data.append({
-            'id': email_id,
-            'subject': subject,
-            'from': from_name,
-            'from_full': from_addr,  # Keep full address too
-            'date': date,
-            'message_id': message_id,
-            'in_reply_to': in_reply_to,
-            'references': references,
-            'body': body,
-            'is_read': is_read
-        })
-    
-    # Build threads
-    threads = build_threads(emails_data)
-    
-    # Display emails with thread grouping
-    idx_mapping = _display_emails(emails_data, threads, expand_thread, {} if display else None)
-    
-    # Save to cache when fetching fresh
-    if display:
-        save_cache(emails_data, threads, idx_mapping)
-    
-    mail.close()
-    mail.logout()
-    
-    # Return mapping for potential reading
-    return idx_mapping
-
-def _display_emails(emails_data, threads, expand_thread, idx_mapping):
-    """Display emails with thread grouping"""
-    # If idx_mapping is None, we're not displaying
-    if idx_mapping is None:
-        return {}
-    
-    # Print header
-    print(f"\n{Colors.BOLD}{'  ID':<6} {'SUBJECT':<40} {'FROM':<35} {'DATE':<12}{Colors.ENDC}")
-    print(f"{Colors.DIM}{'─' * 94}{Colors.ENDC}")
-    displayed_messages = set()
-    display_idx = 0
-    idx_to_email = {}  # Map display index to email data
-    
-    for email_data in emails_data:
-        if email_data['message_id'] in displayed_messages:
-            continue
+                from_name = from_addr
             
-        thread_id = None
-        thread_messages = []
-        
-        # Find thread for this message
-        for tid, messages in threads.items():
-            if any(m['message_id'] == email_data['message_id'] for m in messages):
-                thread_id = tid
-                thread_messages = messages
-                break
-        
-        # Show thread or single message
-        if len(thread_messages) > 1 and expand_thread != display_idx:
-            # Collapsed thread - show latest message
-            latest = thread_messages[-1]
+            # Extract body
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body = part.get_payload(decode=True).decode('utf-8', errors='replace')
+                        break
+            else:
+                body = msg.get_payload(decode=True).decode('utf-8', errors='replace')
             
-            # Truncate if needed
-            from_name = latest['from']
-            if len(from_name) > 34:
-                from_name = from_name[:31] + "..."
+            emails_data.append({
+                'id': email_id,
+                'subject': subject,
+                'from': from_name,
+                'from_full': from_addr,
+                'date': date,
+                'message_id': message_id,
+                'in_reply_to': in_reply_to,
+                'references': references,
+                'body': body,
+                'is_read': '\\Seen' in flags
+            })
+        
+        mail.close()
+        mail.logout()
+        
+        # Build display items
+        display_items = build_display_items(emails_data)
+        
+        # Save to cache
+        save_cache(display_items)
+    
+    # Display emails using Rich Table
+    table = Table(show_header=True, header_style="bold", box=SIMPLE, padding=(0, 1), expand=True)
+    table.add_column("ID", width=6, no_wrap=True)
+    table.add_column("Subject", width=40, no_wrap=True, overflow="ellipsis")
+    table.add_column("From", style="cyan", no_wrap=True, overflow="ellipsis")
+    table.add_column("Date", width=12, no_wrap=True)
+    
+    for idx, item in enumerate(display_items):
+        if item['type'] == 'thread':
+            messages = item['messages']
+            latest = messages[-1]
             
-            # Clean subject - remove "Re: " prefix
+            # Clean subject
             subject = latest['subject']
             if subject.lower().startswith('re: '):
                 subject = subject[4:]
             
             # Add thread count
-            subject_with_count = f"{subject} ({len(thread_messages)})"
-            if len(subject_with_count) > 39:
-                # Truncate subject part, keep count
-                max_subj_len = 39 - len(f" ({len(thread_messages)})")
-                subject = subject[:max_subj_len - 3] + "..."
-                subject_with_count = f"{subject} ({len(thread_messages)})"
+            subject = f"{subject} ({len(messages)})"
+            
+            # Get from name - use from_full if available
+            from_full = latest.get('from_full', latest['from'])
+            from_name = latest['from']
+            
+            # Show email in parentheses if we have a display name
+            if from_name != from_full and '(' not in from_name:
+                # Extract email from from_full
+                if '<' in from_full:
+                    email_part = from_full.split('<')[1].split('>')[0]
+                    from_name = f"{from_name} ({email_part})"
+            
+            
+            # Check if any unread
+            has_unread = any(not m.get('is_read', True) for m in messages)
             
             # Format date
             date_str = format_date(latest['date'])
             
-            # Check if thread has any unread messages
-            has_unread = any(not m.get('is_read', True) for m in thread_messages)
+            # Build row with appropriate styling
+            id_col = f"● {idx}" if has_unread else f"  {idx}"
             
-            # Format with dot and bold if unread
             if has_unread:
-                print(f"{Colors.BOLD}● {display_idx:<4} {subject_with_count:<40} {Colors.CYAN}{from_name:<35}{Colors.ENDC} {Colors.BOLD}{date_str:<12}{Colors.ENDC}")
+                table.add_row(
+                    id_col,
+                    subject,
+                    from_name,
+                    date_str,
+                    style="bold"
+                )
             else:
-                print(f"  {Colors.DIM}{display_idx:<4}{Colors.ENDC} {subject_with_count:<40} {Colors.DIM}{Colors.CYAN}{from_name:<35}{Colors.ENDC} {Colors.DIM}{date_str:<12}{Colors.ENDC}")
-            
-            idx_to_email[display_idx] = latest
-            for m in thread_messages:
-                displayed_messages.add(m['message_id'])
-            display_idx += 1
-            
-        elif len(thread_messages) > 1 and expand_thread == display_idx:
-            # Expanded thread - show all messages
-            for i, msg in enumerate(thread_messages):
-                # Truncate if needed
-                from_name = msg['from']
-                if len(from_name) > 34:
-                    from_name = from_name[:31] + "..."
-                subject = msg['subject']
-                if len(subject) > 36:
-                    subject = subject[:33] + "..."
-                
-                # Format date
-                date_str = format_date(msg['date'])
-                
-                # Add thread indicator
-                if i > 0:
-                    subject = "↳ " + subject
-                
-                # Check if message is unread
-                is_unread = not msg.get('is_read', True)
-                
-                # Format with dot and bold if unread
-                if is_unread:
-                    print(f"{Colors.BOLD}● {display_idx:<4} {subject:<40} {Colors.CYAN}{from_name:<35}{Colors.ENDC} {Colors.BOLD}{date_str:<12}{Colors.ENDC}")
-                else:
-                    print(f"  {Colors.DIM}{display_idx:<4}{Colors.ENDC} {subject:<40} {Colors.DIM}{Colors.CYAN}{from_name:<35}{Colors.ENDC} {Colors.DIM}{date_str:<12}{Colors.ENDC}")
-                
-                idx_to_email[display_idx] = msg
-                displayed_messages.add(msg['message_id'])
-                display_idx += 1
+                table.add_row(
+                    id_col,
+                    subject,
+                    from_name,
+                    date_str,
+                    style="dim"
+                )
         else:
             # Single message
-            # Truncate if needed
-            from_name = email_data['from']
-            if len(from_name) > 34:
-                from_name = from_name[:31] + "..."
+            msg = item['message']
             
-            # Clean subject - remove "Re: " prefix
-            subject = email_data['subject']
+            # Clean subject
+            subject = msg['subject']
             if subject.lower().startswith('re: '):
                 subject = subject[4:]
             
-            if len(subject) > 39:
-                subject = subject[:36] + "..."
+            
+            # Get from name - use from_full if available
+            from_full = msg.get('from_full', msg['from'])
+            from_name = msg['from']
+            
+            # Show email in parentheses if we have a display name
+            if from_name != from_full and '(' not in from_name:
+                # Extract email from from_full
+                if '<' in from_full:
+                    email_part = from_full.split('<')[1].split('>')[0]
+                    from_name = f"{from_name} ({email_part})"
+            
             
             # Format date
-            date_str = format_date(email_data['date'])
+            date_str = format_date(msg['date'])
             
-            # Check if message is unread
-            is_unread = not email_data.get('is_read', True)
+            # Build row with appropriate styling
+            is_unread = not msg.get('is_read', True)
+            id_col = f"● {idx}" if is_unread else f"  {idx}"
             
-            # Format with dot and bold if unread
             if is_unread:
-                print(f"{Colors.BOLD}● {display_idx:<4} {subject:<40} {Colors.CYAN}{from_name:<35}{Colors.ENDC} {Colors.BOLD}{date_str:<12}{Colors.ENDC}")
+                table.add_row(
+                    id_col,
+                    subject,
+                    from_name,
+                    date_str,
+                    style="bold"
+                )
             else:
-                print(f"  {Colors.DIM}{display_idx:<4}{Colors.ENDC} {subject:<40} {Colors.DIM}{Colors.CYAN}{from_name:<35}{Colors.ENDC} {Colors.DIM}{date_str:<12}{Colors.ENDC}")
-            
-            idx_to_email[display_idx] = email_data
-            displayed_messages.add(email_data['message_id'])
-            display_idx += 1
+                table.add_row(
+                    id_col,
+                    subject,
+                    from_name,
+                    date_str,
+                    style="dim"
+                )
     
-    return idx_to_email
+    console.print()
+    console.print(table)
+
+def read_email(index):
+    """Read a specific email or thread"""
+    cache_data = load_cache()
+    ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
+    
+    display_items = cache_data['display_items']
+    ensure(0 <= index < len(display_items), f"Invalid index. Choose between 0 and {len(display_items) - 1}")
+    
+    item = display_items[index]
+    
+    if item['type'] == 'thread':
+        # Display thread
+        messages = item['messages']
+        thread_indices = item.get('thread_indices', {})
+        
+        # Build thread tree for proper parent-child relationships
+        id_to_msg = {m['message_id']: m for m in messages}
+        roots = []
+        
+        for msg in messages:
+            if not msg['in_reply_to'] or msg['in_reply_to'] not in id_to_msg:
+                roots.append(msg)
+        
+        def format_thread_path(msg):
+            """Format the thread path using computed indices"""
+            path = thread_indices.get(msg['message_id'], [])
+            if not path:
+                return str(index)  # Root message shows as just the index
+            return f"{index}.{'.'.join(map(str, path))}"
+        
+        def build_tree(msg, depth=0):
+            # Find children
+            children = [m for m in messages if m['in_reply_to'] == msg['message_id']]
+            # Sort children by their thread index so .0 appears last (bottom)
+            children.sort(key=lambda m: thread_indices.get(m['message_id'], []))
+            
+            # Render this message with proper thread path
+            thread_ref = format_thread_path(msg)
+            render_message_panel(msg, thread_ref, depth, console)
+            
+            # Render children - reversed so newest (.0) appears at bottom
+            for child in reversed(children):
+                build_tree(child, depth + 1)
+        
+        console.print()
+        for root in roots:
+            build_tree(root)
+    else:
+        # Display single message
+        msg = item['message']
+        console.print()
+        console.print(f"{msg['subject']} [dim]·[/dim] [dim cyan]{msg['from']}[/dim cyan] [dim]·[/dim] [dim]{format_date(msg['date'])}[/dim]")
+        console.print(Rule(style="dim"))
+        console.print()
+        console.print(msg['body'])
+    
+    # Mark messages as read
+    emails_to_mark = []
+    if item['type'] == 'thread':
+        emails_to_mark = [m['id'] for m in item['messages'] if not m.get('is_read', True)]
+    else:
+        if not item['message'].get('is_read', True):
+            emails_to_mark = [item['message']['id']]
+    
+    if emails_to_mark:
+        mark_emails_as_read(emails_to_mark)
+        
+        # Update cache
+        if item['type'] == 'thread':
+            for msg in item['messages']:
+                if msg['id'] in emails_to_mark:
+                    msg['is_read'] = True
+        else:
+            item['message']['is_read'] = True
+        
+        save_cache(display_items)
+
+def render_message_panel(msg, thread_ref, depth, console):
+    """Render a message as a Rich panel"""
+    content = Text()
+    
+    is_unread = not msg.get('is_read', True)
+    
+    if is_unread:
+        content.append(f"{msg['subject']} · ", style="bold")
+        content.append(msg['from'], style="bold cyan")
+        content.append(f" · {format_date(msg['date'])}", style="bold")
+    else:
+        content.append(f"{msg['subject']} · ", style="bold")
+        content.append(msg['from'], style="cyan")
+        content.append(f" · {format_date(msg['date'])}", style="dim")
+    
+    content.append("\n")
+    content.append("─" * 72, style="bright_black")
+    content.append("\n")
+    content.append(msg['body'].strip())
+    
+    title = f"[dim white]{{{thread_ref}}}[/dim white]"
+    if is_unread:
+        title = f"[bold white]●[/bold white] " + title
+    
+    panel = Panel(
+        content,
+        title=title,
+        title_align="center",
+        border_style="bold" if is_unread else "bright_black",
+        padding=(0, 1),
+        width=76,
+        expand=False
+    )
+    
+    if depth > 0:
+        padded = Padding(panel, (0, 0, 0, depth * 2))
+        console.print(padded)
+    else:
+        console.print(panel)
+
+def mark_emails_as_read(email_ids):
+    """Mark emails as read in IMAP"""
+    password = get_password()
+    
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+    mail.login(LOGIN, password)
+    mail.select('INBOX')
+    
+    for email_id in email_ids:
+        try:
+            mail.store(email_id, '+FLAGS', '\\Seen')
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not mark email {email_id} as read: {e}[/yellow]")
+    
+    mail.close()
+    mail.logout()
+
+def delete_emails(email_ids):
+    """Delete emails from IMAP"""
+    password = get_password()
+    
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+    mail.login(LOGIN, password)
+    mail.select('INBOX')
+    
+    # Mark each email for deletion
+    deleted_count = 0
+    for email_id in email_ids:
+        try:
+            mail.store(email_id, '+FLAGS', '\\Deleted')
+            deleted_count += 1
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not delete email {email_id}: {e}[/yellow]")
+    
+    # Expunge to permanently delete
+    mail.expunge()
+    mail.close()
+    mail.logout()
+    
+    return deleted_count
 
 def send_email(recipient, subject, body, in_reply_to=None):
     """Send an email"""
@@ -693,7 +738,7 @@ def send_email(recipient, subject, body, in_reply_to=None):
     
     msg.attach(MIMEText(body, 'plain'))
     
-    # Connect to SMTP
+    # Connect to SMTP server
     server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
     server.starttls()
     server.login(LOGIN, password)
@@ -702,486 +747,416 @@ def send_email(recipient, subject, body, in_reply_to=None):
     server.send_message(msg)
     server.quit()
     
-    print(f"{Colors.GREEN}✓ Email sent to {recipient}{Colors.ENDC}")
+    console.print(f"[green]✓ Email sent to {recipient}[/green]")
 
-def mark_emails_as_read(email_ids):
-    """Mark emails as read in IMAP"""
-    password = get_password()
+def parse_index(index_str):
+    """Parse index string like '0', '0.1', '0.last' into structured format"""
+    parts = index_str.split('.')
+    parsed = []
     
-    # Connect to IMAP
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-    mail.login(LOGIN, password)
-    mail.select('INBOX')
+    for part in parts:
+        if part in ['last', 'latest']:
+            parsed.append('last')  # Normalize both to 'last'
+        elif part.isdigit():
+            parsed.append(int(part))
+        else:
+            raise ValueError(f"Invalid index part: {part}")
     
-    # Mark each email as read
-    for email_id in email_ids:
+    return parsed
+
+def resolve_index(parsed_index, display_items):
+    """Resolve parsed index to actual message data"""
+    if not parsed_index:
+        raise ValueError("Empty index")
+    
+    # Get the main item
+    main_idx = parsed_index[0]
+    if main_idx >= len(display_items):
+        raise ValueError(f"Index {main_idx} out of range (0-{len(display_items)-1})")
+    
+    item = display_items[main_idx]
+    
+    # If no sub-index, return the whole item
+    if len(parsed_index) == 1:
+        return {
+            'type': 'item',
+            'data': item,
+            'index': main_idx
+        }
+    
+    # Handle thread navigation
+    if item['type'] != 'thread':
+        raise ValueError(f"Item {main_idx} is not a thread")
+    
+    messages = item['messages']
+    thread_indices = item.get('thread_indices', {})
+    
+    # Build reverse map: path -> message
+    path_to_msg = {}
+    for msg in messages:
+        msg_id = msg['message_id']
+        path = thread_indices.get(msg_id, [])
+        if not path:  # Root message
+            path_to_msg[tuple()] = msg
+        else:
+            path_to_msg[tuple(path)] = msg
+    
+    # Convert parsed index to path (skip the main index)
+    search_path = []
+    for part in parsed_index[1:]:
+        if part == 'last':
+            # Find the message with the longest path at this level
+            candidates = [p for p in path_to_msg.keys() if len(p) == len(search_path) + 1 and p[:len(search_path)] == tuple(search_path)]
+            if not candidates:
+                raise ValueError(f"No messages at path {'.'.join(map(str, parsed_index))}")
+            # Get the one with index 0 (newest)
+            search_path.append(0)
+        else:
+            search_path.append(part)
+    
+    # Find the message
+    target_path = tuple(search_path)
+    if target_path not in path_to_msg:
+        raise ValueError(f"No message at path {'.'.join(map(str, parsed_index))}")
+    
+    return {
+        'type': 'message',
+        'data': path_to_msg[target_path],
+        'thread': item,
+        'index_str': '.'.join(map(str, parsed_index))
+    }
+
+def parse_arguments(args):
+    """Parse command line arguments into structured format"""
+    if not args:
+        return {'action': 'list'}
+    
+    # Check if first arg looks like an index
+    first_arg = args[0]
+    
+    # Check if first arg is an email address
+    if '@' in first_arg:
+        # Email pattern: <email> <subject> <body>
+        if len(args) >= 3:
+            return {
+                'action': 'send',
+                'recipient': first_arg,
+                'subject': args[1],
+                'body': ' '.join(args[2:])
+            }
+        else:
+            return {
+                'action': 'error',
+                'message': f"Invalid email syntax. Usage: smail <email> <subject> <body>"
+            }
+    
+    # Check if it's just two strings (send to self)
+    if len(args) >= 2 and not any(arg in ['reply', 'delete', 'help', 'compose'] for arg in args):
+        # Check if first arg is not an index
         try:
-            mail.store(email_id, '+FLAGS', '\\Seen')
-        except Exception as e:
-            # Continue even if one fails
-            print(f"{Colors.YELLOW}Warning: Could not mark email {email_id} as read: {e}{Colors.ENDC}")
+            parse_index(first_arg)
+        except ValueError:
+            # Not an index, treat as subject for self-email
+            return {
+                'action': 'send',
+                'recipient': EMAIL,  # Send to self
+                'subject': args[0],
+                'body': ' '.join(args[1:])
+            }
     
-    mail.close()
-    mail.logout()
-
-def read_email(email_ref, idx_to_email=None):
-    """Read a specific email or thread by number (e.g., 0 or 0.1)"""
-    if idx_to_email is None:
-        # Load from cache
-        cache_data = load_cache()
-        ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
-        idx_to_email = cache_data['idx_mapping']
-        emails_data = cache_data['emails']
-        threads = {}
-        for thread_id, email_ids in cache_data['threads'].items():
-            thread_emails = []
-            # Preserve order from the thread data
-            for email_id in email_ids:
-                for e in emails_data:
-                    if e['id'] == email_id:
-                        thread_emails.append(e)
-                        break
-            if thread_emails:
-                threads[thread_id] = thread_emails
+    # Actions that don't require an index
+    standalone_actions = ['reply', 'compose', 'help']
+    if first_arg in standalone_actions:
+        return {
+            'action': first_arg,
+            'args': args[1:]
+        }
     
-    # Track which emails to mark as read
-    emails_to_mark_read = []
-    
-    # Parse email reference (e.g., "0" or "0.1")
-    if '.' in str(email_ref):
-        # Thread message reference (e.g., 0.1)
-        parts = str(email_ref).split('.')
-        thread_idx = int(parts[0])
-        msg_idx = int(parts[1])
+    # Try to parse as index
+    try:
+        parsed_index = parse_index(first_arg)
         
-        ensure(thread_idx in idx_to_email, f"Invalid thread number. Choose between 0 and {len(idx_to_email) - 1}")
-        
-        # Find the thread for this index
-        email_data = idx_to_email[thread_idx]
-        thread_id = None
-        thread_messages = []
-        
-        for tid, messages in threads.items():
-            if any(m['message_id'] == email_data['message_id'] for m in messages):
-                thread_id = tid
-                thread_messages = messages
-                break
-        
-        ensure(thread_messages, "No thread found for this email")
-        ensure(0 <= msg_idx < len(thread_messages), f"Invalid message index. Choose between 0 and {len(thread_messages) - 1}")
-        
-        # Display specific message from thread (0 is newest)
-        msg = thread_messages[-(msg_idx + 1)]  # Reverse index
-        subject = msg['subject']
-        from_name = msg['from']
-        date_str = format_date(msg['date'])
-        body = msg.get('body', '')
-        
-        print()
-        print(f"{subject} {Colors.DIM}·{Colors.ENDC} {Colors.DIM}{Colors.CYAN}{from_name}{Colors.ENDC} {Colors.DIM}·{Colors.ENDC} {Colors.DIM}{date_str}{Colors.ENDC}")
-        print(f"{Colors.DIM}{'─' * 80}{Colors.ENDC}")
-        print()
-        print(body)
-        
-        # Mark this single message as read if not already read
-        if not msg.get('is_read', True):
-            emails_to_mark_read.append(msg['id'])
-        
-    else:
-        # Simple email/thread reference (e.g., 0)
-        email_number = int(email_ref)
-        ensure(email_number in idx_to_email, f"Invalid email number. Choose between 0 and {len(idx_to_email) - 1}")
-        
-        email_data = idx_to_email[email_number]
-        
-        # Check if this is part of a thread
-        thread_id = None
-        thread_messages = []
-        
-        for tid, messages in threads.items():
-            if any(m['message_id'] == email_data['message_id'] for m in messages):
-                thread_id = tid
-                thread_messages = messages
-                break
-        
-        if len(thread_messages) > 1:
-            # Build thread tree
-            tree_roots = build_thread_tree(thread_messages)
-            
-            # Should have exactly one root for a proper thread
-            ensure(len(tree_roots) == 1, "Thread has multiple roots - data inconsistency")
-            root = tree_roots[0]
-            
-            # Set parent references
-            def set_parents(n, parent=None):
-                n._parent = parent
-                for child in n.children:
-                    set_parents(child, n)
-            set_parents(root)
-            
-            # Display the thread tree with proper boxes
-            print()
-            _display_thread_node(root, "", True, False)
-            
-            # Mark all unread messages in thread as read
-            emails_to_mark_read.extend([msg['id'] for msg in thread_messages if not msg.get('is_read', True)])
+        # Check for action after index
+        if len(args) > 1:
+            action = args[1]
+            action_args = args[2:]
+            return {
+                'action': action,
+                'index': parsed_index,
+                'index_str': first_arg,
+                'args': action_args
+            }
         else:
-            # Display single email
-            subject = email_data['subject']
-            from_name = email_data['from']
-            date_str = format_date(email_data['date'])
-            body = email_data.get('body', '')
-            
-            print()
-            print(f"{subject} {Colors.DIM}·{Colors.ENDC} {Colors.DIM}{Colors.CYAN}{from_name}{Colors.ENDC} {Colors.DIM}·{Colors.ENDC} {Colors.DIM}{date_str}{Colors.ENDC}")
-            print(f"{Colors.DIM}{'─' * 80}{Colors.ENDC}")
-            print()
-            print(body)
-            
-            # Mark this single email as read if not already read
-            if not email_data.get('is_read', True):
-                emails_to_mark_read.append(email_data['id'])
-    
-    # Mark emails as read
-    if emails_to_mark_read:
-        mark_emails_as_read(emails_to_mark_read)
-        
-        # Update cache to reflect read status
-        cache_data = load_cache()
-        if cache_data:
-            # Update is_read status in cache
-            for email in cache_data['emails']:
-                if email['id'] in emails_to_mark_read:
-                    email['is_read'] = True
-            
-            # Also update idx_mapping if present
-            for idx, email in cache_data.get('idx_mapping', {}).items():
-                if email['id'] in emails_to_mark_read:
-                    email['is_read'] = True
-            
-            # Save updated cache - use the threads structure from cache
-            save_cache(cache_data['emails'], 
-                      cache_data['threads'], 
-                      cache_data['idx_mapping'])
-
-def _render_thread_with_rich(root):
-    """Render thread using Rich with simple indentation"""
-    console = Console()
-    
-    def render_node(node, depth=0):
-        """Render a node with indentation"""
-        msg = node.message
-        subject = msg['subject']
-        from_name = msg['from']
-        date_str = format_date(msg['date'])
-        body = msg.get('body', '')
-        thread_ref = node.thread_id
-        
-        # Check if message is unread
-        is_unread = not msg.get('is_read', True)
-        
-        # Build the panel content
-        content = Text()
-        
-        # Add unread indicator if needed
-        if is_unread:
-            # Bold styling for unread messages
-            content.append(f"{subject} · ", style="bold")
-            content.append(from_name, style="bold cyan")
-            content.append(f" · {date_str}", style="bold")
-        else:
-            content.append(f"{subject} · ", style="bold")
-            content.append(from_name, style="cyan")
-            content.append(f" · {date_str}", style="dim")
-        
-        content.append("\n")
-        content.append("─" * 72, style="bright_black")  # Divider line
-        content.append("\n")
-        content.append(body.strip())
-        
-        # Create panel with unread indicator in title if needed
-        title = f"[dim white]{{{thread_ref}}}[/dim white]"
-        if is_unread:
-            title = f"[bold white]●[/bold white] " + title
-        
-        panel = Panel(
-            content,
-            title=title,
-            title_align="center",
-            border_style="bold" if is_unread else "bright_black",
-            padding=(0, 1),
-            width=76,
-            expand=False
-        )
-        
-        # Print with indentation
-        if depth > 0:
-            from rich.padding import Padding
-            padded = Padding(panel, (0, 0, 0, depth * 2))
-            console.print(padded)
-        else:
-            console.print(panel)
-        
-        # Render children (reversed so newest is last)
-        children_sorted = sorted(node.children, key=lambda x: int(x.thread_id.split('.')[-1]), reverse=True)
-        for child in children_sorted:
-            render_node(child, depth + 1)
-    
-    render_node(root)
-
-def _display_thread_node(node, prefix="", is_last=True, parent_has_more=False):
-    """Display a thread node - wrapper for Rich implementation"""
-    # For the root call, use the Rich renderer
-    if not prefix:  # Root node
-        _render_thread_with_rich(node)
-
-def delete_emails(email_ids):
-    """Delete emails from IMAP"""
-    password = get_password()
-    
-    # Connect to IMAP
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-    mail.login(LOGIN, password)
-    mail.select('INBOX')
-    
-    # Mark each email for deletion
-    deleted_count = 0
-    for email_id in email_ids:
-        try:
-            mail.store(email_id, '+FLAGS', '\\Deleted')
-            deleted_count += 1
-        except Exception as e:
-            print(f"{Colors.YELLOW}Warning: Could not delete email {email_id}: {e}{Colors.ENDC}")
-    
-    # Expunge to permanently delete
-    mail.expunge()
-    mail.close()
-    mail.logout()
-    
-    return deleted_count
-
-def delete_email(email_ref):
-    """Delete a specific email or thread by number"""
-    # Load from cache
-    cache_data = load_cache()
-    ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
-    
-    idx_to_email = cache_data['idx_mapping']
-    emails_data = cache_data['emails']
-    threads = {}
-    for thread_id, email_ids in cache_data['threads'].items():
-        thread_emails = []
-        for email_id in email_ids:
-            for e in emails_data:
-                if e['id'] == email_id:
-                    thread_emails.append(e)
-                    break
-        if thread_emails:
-            threads[thread_id] = thread_emails
-    
-    # Track which emails to delete
-    emails_to_delete = []
-    
-    # Parse email reference (e.g., "0" or "0.1")
-    if '.' in str(email_ref):
-        # Thread message reference (e.g., 0.1)
-        parts = str(email_ref).split('.')
-        thread_idx = int(parts[0])
-        msg_idx = int(parts[1])
-        
-        ensure(thread_idx in idx_to_email, f"Invalid thread number. Choose between 0 and {len(idx_to_email) - 1}")
-        
-        # Find the thread for this index
-        email_data = idx_to_email[thread_idx]
-        thread_id = None
-        thread_messages = []
-        
-        for tid, messages in threads.items():
-            if any(m['message_id'] == email_data['message_id'] for m in messages):
-                thread_id = tid
-                thread_messages = messages
-                break
-        
-        ensure(thread_messages, "No thread found for this email")
-        ensure(0 <= msg_idx < len(thread_messages), f"Invalid message index. Choose between 0 and {len(thread_messages) - 1}")
-        
-        # Delete specific message from thread
-        msg = thread_messages[-(msg_idx + 1)]  # Reverse index
-        emails_to_delete.append(msg['id'])
-        
-        print(f"Deleting message: {msg['subject']} from {msg['from']}")
-        
-    else:
-        # Simple email/thread reference (e.g., 0)
-        email_number = int(email_ref)
-        ensure(email_number in idx_to_email, f"Invalid email number. Choose between 0 and {len(idx_to_email) - 1}")
-        
-        email_data = idx_to_email[email_number]
-        
-        # Check if this is part of a thread
-        thread_id = None
-        thread_messages = []
-        
-        for tid, messages in threads.items():
-            if any(m['message_id'] == email_data['message_id'] for m in messages):
-                thread_id = tid
-                thread_messages = messages
-                break
-        
-        if len(thread_messages) > 1:
-            # Delete entire thread
-            emails_to_delete.extend([msg['id'] for msg in thread_messages])
-            print(f"Deleting thread: {email_data['subject']} ({len(thread_messages)} messages)")
-        else:
-            # Delete single email
-            emails_to_delete.append(email_data['id'])
-            print(f"Deleting email: {email_data['subject']} from {email_data['from']}")
-    
-    # Confirm deletion
-    response = input(f"\n{Colors.YELLOW}Are you sure? (y/N): {Colors.ENDC}")
-    if response.lower() != 'y':
-        print("Cancelled.")
-        return
-    
-    # Delete emails
-    deleted_count = delete_emails(emails_to_delete)
-    
-    if deleted_count > 0:
-        print(f"{Colors.GREEN}✓ Deleted {deleted_count} message(s){Colors.ENDC}")
-        # Clear cache to force refresh
-        CACHE_PATH.unlink(missing_ok=True)
-    else:
-        print(f"{Colors.RED}Failed to delete messages{Colors.ENDC}")
-
-def reply_email(email_ref, body):
-    """Reply to a specific email or thread message"""
-    # Load from cache
-    cache_data = load_cache()
-    ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
-    
-    idx_to_email = cache_data['idx_mapping']
-    emails_data = cache_data['emails']
-    threads = {}
-    for thread_id, email_ids in cache_data['threads'].items():
-        thread_emails = []
-        for email_id in email_ids:
-            for e in emails_data:
-                if e['id'] == email_id:
-                    thread_emails.append(e)
-                    break
-        if thread_emails:
-            threads[thread_id] = thread_emails
-    
-    # Parse email reference (e.g., "0", "0.1", or "0.last")
-    if '.' in str(email_ref):
-        # Thread message reference
-        parts = str(email_ref).split('.')
-        thread_idx = int(parts[0])
-        
-        ensure(thread_idx in idx_to_email, f"Invalid thread number. Choose between 0 and {len(idx_to_email) - 1}")
-        
-        # Find the thread for this index
-        thread_email_data = idx_to_email[thread_idx]
-        thread_id = None
-        thread_messages = []
-        
-        for tid, messages in threads.items():
-            if any(m['message_id'] == thread_email_data['message_id'] for m in messages):
-                thread_id = tid
-                thread_messages = messages
-                break
-        
-        ensure(thread_messages, "No thread found for this email")
-        
-        # Handle .last shortcut
-        if parts[1] == "last":
-            # Get the newest message in the thread (last in the list)
-            email_data = thread_messages[-1]
-        else:
-            msg_idx = int(parts[1])
-            ensure(0 <= msg_idx < len(thread_messages), f"Invalid message index. Choose between 0 and {len(thread_messages) - 1}")
-            # Get specific message from thread (0 is newest)
-            email_data = thread_messages[-(msg_idx + 1)]
-    else:
-        # Simple email reference
-        email_number = int(email_ref)
-        ensure(email_number in idx_to_email, f"Invalid email number. Choose between 0 and {len(idx_to_email) - 1}")
-        email_data = idx_to_email[email_number]
-    
-    # Determine recipient
-    from_full = email_data.get('from_full', email_data['from'])
-    
-    # Extract email address from full address
-    if '<' in from_full:
-        recipient = from_full.split('<')[1].split('>')[0]
-    else:
-        recipient = from_full
-    
-    # If we sent this email, we need to reply to ourselves for testing
-    # In a real scenario, you'd parse the To: field from the original
-    if recipient == EMAIL or recipient == LOGIN:
-        # For now, reply to ourselves
-        recipient = EMAIL
-    
-    # Prepare subject
-    subject = email_data['subject']
-    if not subject.lower().startswith('re: '):
-        subject = 'Re: ' + subject
-    
-    # Send threaded reply
-    message_id = email_data.get('message_id', '')
-    send_email(recipient, subject, body, in_reply_to=message_id)
-    
-    print(f"{Colors.DIM}Replying to: {email_data['from']}{Colors.ENDC}")
+            # Default action is read
+            return {
+                'action': 'read',
+                'index': parsed_index,
+                'index_str': first_arg
+            }
+    except ValueError:
+        # Not a valid index, might be an unknown command
+        return {
+            'action': 'error',
+            'message': f"Unknown command: {first_arg}"
+        }
 
 def main():
     """Main entry point"""
-    if len(sys.argv) == 1:
-        # Default: list emails
-        list_emails()
-    elif sys.argv[1] == "send":
-        if len(sys.argv) == 4:
-            # smail send "subject" "body" - send to btmask
-            send_email(EMAIL, sys.argv[2], sys.argv[3])
-        elif len(sys.argv) == 5:
-            # smail send recipient "subject" "body"
-            send_email(sys.argv[2], sys.argv[3], sys.argv[4])
-        else:
-            print(f"{Colors.YELLOW}Usage:{Colors.ENDC}")
-            print("  smail send \"subject\" \"body\"")
-            print("  smail send recipient@email.com \"subject\" \"body\"")
-            sys.exit(1)
-    elif len(sys.argv) == 4 and sys.argv[2] == "reply":
-        # smail 0 reply "body" or smail 0.1 reply "body" or smail 0.last reply "body"
-        email_ref = sys.argv[1]
-        if email_ref.replace('.', '').isdigit() or email_ref.endswith('.last'):
-            reply_email(email_ref, sys.argv[3])
-    elif len(sys.argv) == 3 and sys.argv[2] == "delete":
-        # smail 0 delete or smail 0.1 delete
-        email_ref = sys.argv[1]
-        if email_ref.replace('.', '').isdigit():
-            delete_email(email_ref)
-    elif sys.argv[1] == "delete" and len(sys.argv) == 3:
-        # smail delete 0 or smail delete 0.1 - alternative syntax
-        delete_email(sys.argv[2])
-    elif sys.argv[1].replace('.', '').isdigit():
-        # smail 1 or smail 0.1 - read email/thread by number
-        read_email(sys.argv[1])
-    elif sys.argv[1] == "read" and len(sys.argv) == 3:
-        # smail read 1 or smail read 0.1 - alternative syntax
-        read_email(sys.argv[2])
-    else:
-        print(f"{Colors.YELLOW}Usage:{Colors.ENDC}")
-        print("  smail                     # List emails")
-        print("  smail 0                   # Read email/thread #0")
-        print("  smail 0.1                 # Read message #1 in thread #0")
-        print("  smail 0 reply \"body\"     # Reply to email #0")
-        print("  smail 0.last reply \"body\" # Reply to newest message in thread #0")
-        print("  smail 0 delete            # Delete email/thread #0")
-        print("  smail 0.1 delete          # Delete message #1 in thread #0")
-        print("  smail send \"subject\" \"body\"")
-        print("  smail send recipient@email.com \"subject\" \"body\"")
-        sys.exit(1)
+    args = sys.argv[1:]
+    
+    try:
+        parsed = parse_arguments(args)
+        
+        match parsed['action']:
+            case 'list':
+                list_emails()
+            
+            case 'read':
+                # Load cache to resolve index
+                cache_data = load_cache()
+                if not cache_data:
+                    console.print("[red]No cached email data. Run 'smail' first.[/red]")
+                    return
+                
+                resolved = resolve_index(parsed['index'], cache_data['display_items'])
+                
+                if resolved['type'] == 'item':
+                    # Reading a whole item (thread or single message)
+                    read_email(resolved['index'])
+                else:
+                    # Reading a specific message in a thread
+                    msg = resolved['data']
+                    console.print()
+                    render_message_panel(msg, resolved['index_str'], 0, console)
+            
+            case 'send':
+                send_email(parsed['recipient'], parsed['subject'], parsed['body'])
+            
+            case 'delete':
+                if 'index' not in parsed:
+                    console.print("[red]Error: Delete requires an index[/red]")
+                    console.print("Usage: smail <index> delete")
+                    return
+                
+                # Load cache to resolve index
+                cache_data = load_cache()
+                if not cache_data:
+                    console.print("[red]No cached email data. Run 'smail' first.[/red]")
+                    return
+                
+                try:
+                    resolved = resolve_index(parsed['index'], cache_data['display_items'])
+                    display_items = cache_data['display_items']
+                    
+                    # Collect emails to delete
+                    emails_to_delete = []
+                    
+                    if resolved['type'] == 'item':
+                        item = resolved['data']
+                        if item['type'] == 'thread':
+                            # Delete entire thread
+                            messages = item['messages']
+                            for msg in messages:
+                                emails_to_delete.append(msg['id'])
+                            console.print(f"Deleting thread: {messages[0]['subject']} ({len(messages)} messages)")
+                        else:
+                            # Delete single message
+                            msg = item['message']
+                            emails_to_delete.append(msg['id'])
+                            console.print(f"Deleting message: {msg['subject']} from {msg['from']}")
+                    else:
+                        # Delete specific message in thread
+                        msg = resolved['data']
+                        emails_to_delete.append(msg['id'])
+                        console.print(f"Deleting message: {msg['subject']} from {msg['from']}")
+                    
+                    # Confirm deletion
+                    if len(emails_to_delete) > 1:
+                        confirm = Prompt.ask(f"\nDelete {len(emails_to_delete)} messages?", choices=["y", "n"], default="n")
+                    else:
+                        confirm = Prompt.ask("\nDelete this message?", choices=["y", "n"], default="n")
+                    
+                    if confirm == "y":
+                        deleted_count = delete_emails(emails_to_delete)
+                        console.print(f"[green]✓ Deleted {deleted_count} message(s)[/green]")
+                        
+                        # Update cache by removing deleted items
+                        # For now, just clear cache so next list will refresh
+                        CACHE_PATH.unlink(missing_ok=True)
+                        console.print("[dim]Cache cleared. Run 'smail' to refresh.[/dim]")
+                    else:
+                        console.print("[yellow]Deletion cancelled[/yellow]")
+                        
+                except ValueError as e:
+                    console.print(f"[red]Error: {e}[/red]")
+            
+            case 'reply':
+                if 'index' in parsed:
+                    # Reply to specific message
+                    cache_data = load_cache()
+                    if not cache_data:
+                        console.print("[red]No cached email data. Run 'smail' first.[/red]")
+                        return
+                    
+                    try:
+                        resolved = resolve_index(parsed['index'], cache_data['display_items'])
+                        
+                        # Get the message to reply to
+                        if resolved['type'] == 'item':
+                            item = resolved['data']
+                            if item['type'] == 'thread':
+                                # Reply to latest message in thread
+                                msg = item['messages'][-1]
+                            else:
+                                # Reply to single message
+                                msg = item['message']
+                        else:
+                            # Reply to specific message in thread
+                            msg = resolved['data']
+                        
+                        # Determine recipient
+                        from_full = msg.get('from_full', msg['from'])
+                        
+                        # Extract email address from full address
+                        if '<' in from_full:
+                            recipient = from_full.split('<')[1].split('>')[0]
+                        else:
+                            recipient = from_full
+                        
+                        # If we sent this email, reply to ourselves
+                        if recipient == EMAIL or recipient == LOGIN:
+                            recipient = EMAIL
+                        
+                        # Prepare subject
+                        subject = msg['subject']
+                        if not subject.lower().startswith('re: '):
+                            subject = 'Re: ' + subject
+                        
+                        # Get body from args or use empty
+                        body = ' '.join(parsed.get('args', []))
+                        if not body:
+                            console.print("[red]Error: Reply body is required[/red]")
+                            return
+                        
+                        # Send threaded reply
+                        message_id = msg.get('message_id', '')
+                        send_email(recipient, subject, body, in_reply_to=message_id)
+                        
+                        console.print(f"[dim]Replied to: {msg['from']}[/dim]")
+                        
+                    except ValueError as e:
+                        console.print(f"[red]Error: {e}[/red]")
+                else:
+                    # Reply to latest email
+                    cache_data = load_cache()
+                    if not cache_data:
+                        console.print("[red]No cached email data. Run 'smail' first.[/red]")
+                        return
+                    
+                    display_items = cache_data['display_items']
+                    if not display_items:
+                        console.print("[red]No emails to reply to[/red]")
+                        return
+                    
+                    # Get the latest item (first in list)
+                    latest_item = display_items[0]
+                    
+                    if latest_item['type'] == 'thread':
+                        # Get the absolute newest message across all threads
+                        all_messages = []
+                        for item in display_items:
+                            if item['type'] == 'thread':
+                                all_messages.extend(item['messages'])
+                            else:
+                                all_messages.append(item['message'])
+                        
+                        # Find newest message by date
+                        msg = max(all_messages, key=lambda m: parsedate_to_datetime(m['date']))
+                    else:
+                        msg = latest_item['message']
+                    
+                    # Determine recipient
+                    from_full = msg.get('from_full', msg['from'])
+                    
+                    # Extract email address from full address
+                    if '<' in from_full:
+                        recipient = from_full.split('<')[1].split('>')[0]
+                    else:
+                        recipient = from_full
+                    
+                    # If we sent this email, reply to ourselves
+                    if recipient == EMAIL or recipient == LOGIN:
+                        recipient = EMAIL
+                    
+                    # Prepare subject
+                    subject = msg['subject']
+                    if not subject.lower().startswith('re: '):
+                        subject = 'Re: ' + subject
+                    
+                    # Get body from args
+                    body = ' '.join(parsed.get('args', []))
+                    if not body:
+                        console.print("[red]Error: Reply body is required[/red]")
+                        console.print("Usage: smail reply <body>")
+                        return
+                    
+                    # Send threaded reply
+                    message_id = msg.get('message_id', '')
+                    send_email(recipient, subject, body, in_reply_to=message_id)
+                    
+                    console.print(f"[dim]Replied to: {msg['from']}[/dim]")
+            
+            case 'compose':
+                console.print("[yellow]Compose functionality not yet implemented[/yellow]")
+            
+            case 'help':
+                console.print("[bold]smail - Simple email client for iCloud[/bold]\n")
+                console.print("[bold]Usage:[/bold]")
+                console.print("  smail                    List emails")
+                console.print("  smail <index>            Read email/thread at index")
+                console.print("  smail <index>.<sub>      Read specific message in thread")
+                console.print("  smail <index>.last       Read last message in thread")
+                console.print("  smail <index> delete     Delete email/thread")
+                console.print("  smail <index> reply      Reply to email/thread")
+                console.print("  smail reply              Reply to most recent email")
+                console.print("  smail <subject> <body>   Send email to yourself")
+                console.print("  smail <email> <subject> <body>  Send email to recipient")
+            
+            case 'error':
+                console.print(f"[red]{parsed['message']}[/red]\n")
+                # Show help directly
+                console.print("[bold]Usage:[/bold]")
+                console.print("  smail                    List emails")
+                console.print("  smail <index>            Read email/thread at index")
+                console.print("  smail <index>.<sub>      Read specific message in thread")
+                console.print("  smail <index>.last       Read last message in thread")
+                console.print("  smail <index> delete     Delete email/thread")
+                console.print("  smail <index> reply      Reply to email/thread")
+                console.print("  smail reply              Reply to most recent email")
+                console.print("  smail <subject> <body>   Send email to yourself")
+                console.print("  smail <email> <subject> <body>  Send email to recipient")
+            
+            case _:
+                console.print(f"[red]Unknown action: {parsed['action']}[/red]\n")
+                # Show help directly
+                console.print("[bold]Usage:[/bold]")
+                console.print("  smail                    List emails")
+                console.print("  smail <index>            Read email/thread at index")
+                console.print("  smail <index>.<sub>      Read specific message in thread")
+                console.print("  smail <index>.last       Read last message in thread")
+                console.print("  smail <index> delete     Delete email/thread")
+                console.print("  smail <index> reply      Reply to email/thread")
+                console.print("  smail reply              Reply to most recent email")
+                console.print("  smail <subject> <body>   Send email to yourself")
+                console.print("  smail <email> <subject> <body>  Send email to recipient")
+                
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        if '--debug' in args:
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
