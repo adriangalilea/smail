@@ -23,8 +23,8 @@ smail
 
 # Or manually create config
 cat > ~/.config/smail/config.toml << EOF
-email = "your@icloud.com"
-login = "your.appleid@icloud.com"  # if different
+email = "your@icloud.com"           # your email address (for sending & filtering)
+login = "your.appleid@icloud.com"  # Apple ID if different from email
 keychain = "your-keychain-service"
 EOF
 ```

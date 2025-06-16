@@ -145,8 +145,9 @@ keychain = "{keychain}"
 
 # Load configuration
 config = load_config()
-EMAIL = config['email']
-LOGIN = config.get('login', EMAIL)
+EMAIL = config.get('email', '')  # Optional - if not set, shows all emails
+LOGIN = config.get('login', EMAIL if EMAIL else None)  # Use EMAIL as default if set
+ensure(LOGIN, "Login must be specified in config (either 'login' or 'email' field)")
 KEYCHAIN_SERVICE = config.get('keychain', 'smail-icloud')
 NAME = config.get('name', '')
 
@@ -346,17 +347,24 @@ def list_emails(max_emails=20, from_cache=False):
         mail.login(LOGIN, password)
         mail.select('INBOX')
         
-        # Search for emails to/from our email
-        typ, to_data = mail.search(None, f'(TO "{EMAIL}")')
-        ensure(typ == 'OK', f"Search failed: {typ}")
-        to_ids = to_data[0].split() if to_data[0] else []
-        
-        typ, from_data = mail.search(None, f'(FROM "{EMAIL}")')
-        ensure(typ == 'OK', f"Search failed: {typ}")
-        from_ids = from_data[0].split() if from_data[0] else []
-        
-        # Combine and deduplicate
-        all_ids = list(set(to_ids + from_ids))
+        # Search for emails
+        if EMAIL:
+            # Filter to/from specific email
+            typ, to_data = mail.search(None, f'(TO "{EMAIL}")')
+            ensure(typ == 'OK', f"Search failed: {typ}")
+            to_ids = to_data[0].split() if to_data[0] else []
+            
+            typ, from_data = mail.search(None, f'(FROM "{EMAIL}")')
+            ensure(typ == 'OK', f"Search failed: {typ}")
+            from_ids = from_data[0].split() if from_data[0] else []
+            
+            # Combine and deduplicate
+            all_ids = list(set(to_ids + from_ids))
+        else:
+            # Show all emails
+            typ, data = mail.search(None, 'ALL')
+            ensure(typ == 'OK', f"Search failed: {typ}")
+            all_ids = data[0].split() if data[0] else []
         all_ids.sort(key=lambda x: int(x.decode() if isinstance(x, bytes) else x), reverse=True)
         
         # Limit number of emails
@@ -455,10 +463,10 @@ def list_emails(max_emails=20, from_cache=False):
     
     # Display emails using Rich Table
     table = Table(show_header=True, header_style="bold", box=SIMPLE, padding=(0, 1), expand=True)
-    table.add_column("ID", width=6, no_wrap=True)
-    table.add_column("Subject", width=40, no_wrap=True, overflow="ellipsis")
-    table.add_column("From", style="cyan", no_wrap=True, overflow="ellipsis")
-    table.add_column("Date", width=12, no_wrap=True)
+    table.add_column("#", width=4, no_wrap=True, min_width=4)  # Force minimum width
+    table.add_column("Subject", no_wrap=True, overflow="ellipsis", ratio=2)
+    table.add_column("From", style="cyan", no_wrap=True, overflow="ellipsis", ratio=1)
+    table.add_column("Date", width=10, no_wrap=True)
     
     for idx, item in enumerate(display_items):
         if item['type'] == 'thread':
@@ -751,13 +759,17 @@ def send_email(recipient, subject, body, in_reply_to=None):
     """Send an email"""
     password = get_password()
     
+    # Determine sender email - use LOGIN if EMAIL not set
+    sender_email = EMAIL if EMAIL else LOGIN
+    ensure(sender_email, "Email or login must be configured to send emails")
+    
     # Create message
     msg = MIMEMultipart()
     # Use display name if configured
     if NAME:
-        msg['From'] = f"{NAME} <{EMAIL}>"
+        msg['From'] = f"{NAME} <{sender_email}>"
     else:
-        msg['From'] = EMAIL
+        msg['From'] = sender_email
     msg['To'] = recipient
     msg['Subject'] = subject
     
@@ -887,9 +899,11 @@ def parse_arguments(args):
             parse_index(first_arg)
         except ValueError:
             # Not an index, treat as subject for self-email
+            # Use EMAIL if set, otherwise LOGIN
+            self_email = EMAIL if EMAIL else LOGIN
             return {
                 'action': 'send',
-                'recipient': EMAIL,  # Send to self
+                'recipient': self_email,  # Send to self
                 'subject': args[0],
                 'body': ' '.join(args[1:])
             }
@@ -1112,8 +1126,9 @@ def main():
                             recipient = from_full
                         
                         # If we sent this email, reply to ourselves
-                        if recipient == EMAIL or recipient == LOGIN:
-                            recipient = EMAIL
+                        self_email = EMAIL if EMAIL else LOGIN
+                        if recipient == self_email or recipient == LOGIN:
+                            recipient = self_email
                         
                         # Prepare subject
                         subject = msg['subject']
@@ -1173,8 +1188,9 @@ def main():
                         recipient = from_full
                     
                     # If we sent this email, reply to ourselves
-                    if recipient == EMAIL or recipient == LOGIN:
-                        recipient = EMAIL
+                    self_email = EMAIL if EMAIL else LOGIN
+                    if recipient == self_email or recipient == LOGIN:
+                        recipient = self_email
                     
                     # Prepare subject
                     subject = msg['subject']
