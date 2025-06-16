@@ -33,9 +33,9 @@ Use app-specific passwords from appleid.apple.com.
 ## TODO
 
 - [ ] Support attachments
-- [ ] Support replying (smail reply 0)
+- [x] Support replying (smail reply 0)
 - [ ] Improve performance (connection reuse, parallel fetch)
-- [ ] Delete/archive emails
+- [x] Delete/archive emails
 
 right vis
 ```bash

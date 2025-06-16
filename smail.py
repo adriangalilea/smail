@@ -73,14 +73,11 @@ SMTP_PORT = 587
 # Cache management
 CACHE_PATH = Path.home() / ".cache" / "smail" / "emails.json"
 
-def save_cache(emails_data, threads, idx_mapping):
-    """Save email data to cache"""
+def save_cache(display_items):
+    """Save display items to cache"""
     cache_data = {
-        "version": 1,
         "timestamp": datetime.now().isoformat(),
-        "emails": emails_data,
-        "threads": {k: [e['id'] for e in v] for k, v in threads.items()},
-        "idx_mapping": {str(k): v for k, v in idx_mapping.items()}
+        "display_items": display_items
     }
     
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -95,9 +92,6 @@ def load_cache():
     try:
         with open(CACHE_PATH) as f:
             cache_data = json.load(f)
-        
-        # Reconstruct idx_mapping with integer keys
-        cache_data['idx_mapping'] = {int(k): v for k, v in cache_data['idx_mapping'].items()}
         return cache_data
     except Exception:
         return None
@@ -789,8 +783,9 @@ def read_email(email_ref, idx_to_email=None):
         print()
         print(body)
         
-        # Mark this single message as read
-        emails_to_mark_read.append(msg['id'])
+        # Mark this single message as read if not already read
+        if not msg.get('is_read', True):
+            emails_to_mark_read.append(msg['id'])
         
     else:
         # Simple email/thread reference (e.g., 0)
@@ -828,8 +823,8 @@ def read_email(email_ref, idx_to_email=None):
             print()
             _display_thread_node(root, "", True, False)
             
-            # Mark all messages in thread as read
-            emails_to_mark_read.extend([msg['id'] for msg in thread_messages])
+            # Mark all unread messages in thread as read
+            emails_to_mark_read.extend([msg['id'] for msg in thread_messages if not msg.get('is_read', True)])
         else:
             # Display single email
             subject = email_data['subject']
@@ -843,12 +838,31 @@ def read_email(email_ref, idx_to_email=None):
             print()
             print(body)
             
-            # Mark this single email as read
-            emails_to_mark_read.append(email_data['id'])
+            # Mark this single email as read if not already read
+            if not email_data.get('is_read', True):
+                emails_to_mark_read.append(email_data['id'])
     
     # Mark emails as read
     if emails_to_mark_read:
         mark_emails_as_read(emails_to_mark_read)
+        
+        # Update cache to reflect read status
+        cache_data = load_cache()
+        if cache_data:
+            # Update is_read status in cache
+            for email in cache_data['emails']:
+                if email['id'] in emails_to_mark_read:
+                    email['is_read'] = True
+            
+            # Also update idx_mapping if present
+            for idx, email in cache_data.get('idx_mapping', {}).items():
+                if email['id'] in emails_to_mark_read:
+                    email['is_read'] = True
+            
+            # Save updated cache - use the threads structure from cache
+            save_cache(cache_data['emails'], 
+                      cache_data['threads'], 
+                      cache_data['idx_mapping'])
 
 def _render_thread_with_rich(root):
     """Render thread using Rich with simple indentation"""
@@ -920,6 +934,124 @@ def _display_thread_node(node, prefix="", is_last=True, parent_has_more=False):
     # For the root call, use the Rich renderer
     if not prefix:  # Root node
         _render_thread_with_rich(node)
+
+def delete_emails(email_ids):
+    """Delete emails from IMAP"""
+    password = get_password()
+    
+    # Connect to IMAP
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+    mail.login(LOGIN, password)
+    mail.select('INBOX')
+    
+    # Mark each email for deletion
+    deleted_count = 0
+    for email_id in email_ids:
+        try:
+            mail.store(email_id, '+FLAGS', '\\Deleted')
+            deleted_count += 1
+        except Exception as e:
+            print(f"{Colors.YELLOW}Warning: Could not delete email {email_id}: {e}{Colors.ENDC}")
+    
+    # Expunge to permanently delete
+    mail.expunge()
+    mail.close()
+    mail.logout()
+    
+    return deleted_count
+
+def delete_email(email_ref):
+    """Delete a specific email or thread by number"""
+    # Load from cache
+    cache_data = load_cache()
+    ensure(cache_data, "No cached email data found. Run 'smail' first to fetch emails.")
+    
+    idx_to_email = cache_data['idx_mapping']
+    emails_data = cache_data['emails']
+    threads = {}
+    for thread_id, email_ids in cache_data['threads'].items():
+        thread_emails = []
+        for email_id in email_ids:
+            for e in emails_data:
+                if e['id'] == email_id:
+                    thread_emails.append(e)
+                    break
+        if thread_emails:
+            threads[thread_id] = thread_emails
+    
+    # Track which emails to delete
+    emails_to_delete = []
+    
+    # Parse email reference (e.g., "0" or "0.1")
+    if '.' in str(email_ref):
+        # Thread message reference (e.g., 0.1)
+        parts = str(email_ref).split('.')
+        thread_idx = int(parts[0])
+        msg_idx = int(parts[1])
+        
+        ensure(thread_idx in idx_to_email, f"Invalid thread number. Choose between 0 and {len(idx_to_email) - 1}")
+        
+        # Find the thread for this index
+        email_data = idx_to_email[thread_idx]
+        thread_id = None
+        thread_messages = []
+        
+        for tid, messages in threads.items():
+            if any(m['message_id'] == email_data['message_id'] for m in messages):
+                thread_id = tid
+                thread_messages = messages
+                break
+        
+        ensure(thread_messages, "No thread found for this email")
+        ensure(0 <= msg_idx < len(thread_messages), f"Invalid message index. Choose between 0 and {len(thread_messages) - 1}")
+        
+        # Delete specific message from thread
+        msg = thread_messages[-(msg_idx + 1)]  # Reverse index
+        emails_to_delete.append(msg['id'])
+        
+        print(f"Deleting message: {msg['subject']} from {msg['from']}")
+        
+    else:
+        # Simple email/thread reference (e.g., 0)
+        email_number = int(email_ref)
+        ensure(email_number in idx_to_email, f"Invalid email number. Choose between 0 and {len(idx_to_email) - 1}")
+        
+        email_data = idx_to_email[email_number]
+        
+        # Check if this is part of a thread
+        thread_id = None
+        thread_messages = []
+        
+        for tid, messages in threads.items():
+            if any(m['message_id'] == email_data['message_id'] for m in messages):
+                thread_id = tid
+                thread_messages = messages
+                break
+        
+        if len(thread_messages) > 1:
+            # Delete entire thread
+            emails_to_delete.extend([msg['id'] for msg in thread_messages])
+            print(f"Deleting thread: {email_data['subject']} ({len(thread_messages)} messages)")
+        else:
+            # Delete single email
+            emails_to_delete.append(email_data['id'])
+            print(f"Deleting email: {email_data['subject']} from {email_data['from']}")
+    
+    # Confirm deletion
+    response = input(f"\n{Colors.YELLOW}Are you sure? (y/N): {Colors.ENDC}")
+    if response.lower() != 'y':
+        print("Cancelled.")
+        return
+    
+    # Delete emails
+    deleted_count = delete_emails(emails_to_delete)
+    
+    if deleted_count > 0:
+        print(f"{Colors.GREEN}✓ Deleted {deleted_count} message(s){Colors.ENDC}")
+        # Clear cache to force refresh
+        CACHE_PATH.unlink(missing_ok=True)
+    else:
+        print(f"{Colors.RED}Failed to delete messages{Colors.ENDC}")
 
 def reply_email(email_ref, body):
     """Reply to a specific email or thread message"""
@@ -1024,6 +1156,14 @@ def main():
         email_ref = sys.argv[1]
         if email_ref.replace('.', '').isdigit() or email_ref.endswith('.last'):
             reply_email(email_ref, sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[2] == "delete":
+        # smail 0 delete or smail 0.1 delete
+        email_ref = sys.argv[1]
+        if email_ref.replace('.', '').isdigit():
+            delete_email(email_ref)
+    elif sys.argv[1] == "delete" and len(sys.argv) == 3:
+        # smail delete 0 or smail delete 0.1 - alternative syntax
+        delete_email(sys.argv[2])
     elif sys.argv[1].replace('.', '').isdigit():
         # smail 1 or smail 0.1 - read email/thread by number
         read_email(sys.argv[1])
@@ -1037,6 +1177,8 @@ def main():
         print("  smail 0.1                 # Read message #1 in thread #0")
         print("  smail 0 reply \"body\"     # Reply to email #0")
         print("  smail 0.last reply \"body\" # Reply to newest message in thread #0")
+        print("  smail 0 delete            # Delete email/thread #0")
+        print("  smail 0.1 delete          # Delete message #1 in thread #0")
         print("  smail send \"subject\" \"body\"")
         print("  smail send recipient@email.com \"subject\" \"body\"")
         sys.exit(1)
