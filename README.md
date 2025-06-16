@@ -1,6 +1,17 @@
 # smail
 
-Minimal email client for iCloud.
+Minimal email client for iCloud. Perfect for iCloud email aliases.
+
+## Installation
+
+```bash
+# Install with uv (recommended)
+uv tool install simplemail-cli
+
+# Or use pipx
+pipx install simplemail-cli
+```
+
 
 ## Features
 
@@ -14,8 +25,25 @@ Minimal email client for iCloud.
 - [ ] Unarchive emails (move back from Archive to Inbox)
 - [ ] Attachments
 - [ ] Performance optimization (connection reuse, parallel fetch)
+- [ ] local `smail.toml` with just alias, so one can config per project email 
 
 ## Setup
+
+### 1. Create App-Specific Password
+
+1. Go to [appleid.apple.com](https://appleid.apple.com)
+2. Sign in and navigate to "Sign-In and Security"
+3. Select "App-Specific Passwords"
+4. Click the "+" button to generate a new password
+
+### 2. Create iCloud Email Alias (optional)
+
+1. Go to [iCloud Mail settings](https://www.icloud.com/mail/) 
+2. Click Settings → Accounts → Add Alias
+3. Create an alias (e.g., yourname+smail@icloud.com)
+4. Use this alias in your smail config to keep CLI emails separate
+
+### 3. Configure smail
 
 ```bash
 # First run guides you through setup
@@ -23,10 +51,23 @@ smail
 
 # Or manually create config
 cat > ~/.config/smail/config.toml << EOF
-email = "your@icloud.com"           # your email address (for sending & filtering)
+email = "your@icloud.com"           # your email alias address, will send emails from here and only show emails for this account
 login = "your.appleid@icloud.com"  # Apple ID if different from email
 keychain = "your-keychain-service"
 EOF
+```
+
+### 4. Add Password to Keychain
+
+```bash
+# Add password from command line (macOS)
+security add-generic-password \
+  -a "your.appleid@icloud.com" \
+  -s "your-keychain-service" \
+  -w "your-app-specific-password"
+
+# Or let smail prompt you on first run
+smail
 ```
 
 ## Usage
@@ -51,6 +92,6 @@ smail 0 delete                 # Delete email/thread
 
 ## Security
 
-Passwords are stored in macOS Keychain, never in files.
-Use app-specific passwords from appleid.apple.com.
-
+- Passwords are stored in macOS Keychain, never in files
+- Always use app-specific passwords, not your main Apple ID password
+- The keychain service name in config.toml should match the one used in the `security` command

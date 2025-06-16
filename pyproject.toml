@@ -1,10 +1,32 @@
 [project]
-name = "smail-cli"
+name = "simplemail-cli"
 version = "0.1.0"
+description = "A simple mail client CLI"
+readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    {name = "Adrian Galilea", email = "adriangalilea@gmail.com"}
+]
 dependencies = [
     "rich>=13.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/adriangalilea/smail"
+Repository = "https://github.com/adriangalilea/smail"
+Issues = "https://github.com/adriangalilea/smail/issues"
+
 [project.scripts]
 smail = "smail:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.13",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 999  # Effectively disable line length checks
+
+[tool.ruff.lint]
+ignore = ["E501"]  # Ignore line too long
