@@ -10,6 +10,8 @@ Minimal email client for iCloud.
 - Quick self-email (`smail "reminder" "buy milk"`)
 - Secure keychain password storage
 - Reply tracking with proper threading
+- Archive emails to iCloud Archive folder
+- [ ] Unarchive emails (move back from Archive to Inbox)
 - [ ] Attachments
 - [ ] Performance optimization (connection reuse, parallel fetch)
 
@@ -40,9 +42,10 @@ smail 0.last                   # Read newest message in thread
 smail "Subject" "Body"                      # Send to self
 smail user@example.com "Subject" "Body"     # Send to recipient
 
-# Reply & Delete
+# Reply, Archive & Delete
 smail reply "Quick reply"      # Reply to latest
 smail 0 reply "Reply text"     # Reply to specific
+smail 0 archive                # Archive email/thread
 smail 0 delete                 # Delete email/thread
 ```
 

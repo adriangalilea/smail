@@ -693,6 +693,36 @@ def mark_emails_as_read(email_ids):
     mail.close()
     mail.logout()
 
+def archive_emails(email_ids):
+    """Archive emails by moving to Archive folder"""
+    password = get_password()
+    
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+    mail.login(LOGIN, password)
+    mail.select('INBOX')
+    
+    # Move each email to Archive
+    archived_count = 0
+    for email_id in email_ids:
+        try:
+            # Copy to Archive folder
+            typ, data = mail.copy(email_id, 'Archive')
+            if typ == 'OK':
+                # Mark as deleted in INBOX
+                mail.store(email_id, '+FLAGS', '\\Deleted')
+                archived_count += 1
+            else:
+                console.print(f"[yellow]Warning: Could not archive email {email_id}: {data}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not archive email {email_id}: {e}[/yellow]")
+    
+    # Expunge to remove from INBOX
+    mail.expunge()
+    mail.close()
+    mail.logout()
+    
+    return archived_count
+
 def delete_emails(email_ids):
     """Delete emails from IMAP"""
     password = get_password()
@@ -990,6 +1020,64 @@ def main():
                 except ValueError as e:
                     console.print(f"[red]Error: {e}[/red]")
             
+            case 'archive':
+                if 'index' not in parsed:
+                    console.print("[red]Error: Archive requires an index[/red]")
+                    console.print("Usage: smail <index> archive")
+                    return
+                
+                # Load cache to resolve index
+                cache_data = load_cache()
+                if not cache_data:
+                    console.print("[red]No cached email data. Run 'smail' first.[/red]")
+                    return
+                
+                try:
+                    resolved = resolve_index(parsed['index'], cache_data['display_items'])
+                    display_items = cache_data['display_items']
+                    
+                    # Collect emails to archive
+                    emails_to_archive = []
+                    
+                    if resolved['type'] == 'item':
+                        item = resolved['data']
+                        if item['type'] == 'thread':
+                            # Archive entire thread
+                            messages = item['messages']
+                            for msg in messages:
+                                emails_to_archive.append(msg['id'])
+                            console.print(f"Archiving thread: {messages[0]['subject']} ({len(messages)} messages)")
+                        else:
+                            # Archive single message
+                            msg = item['message']
+                            emails_to_archive.append(msg['id'])
+                            console.print(f"Archiving message: {msg['subject']} from {msg['from']}")
+                    else:
+                        # Archive specific message in thread
+                        msg = resolved['data']
+                        emails_to_archive.append(msg['id'])
+                        console.print(f"Archiving message: {msg['subject']} from {msg['from']}")
+                    
+                    # Confirm archiving
+                    if len(emails_to_archive) > 1:
+                        confirm = Prompt.ask(f"\nArchive {len(emails_to_archive)} messages?", choices=["y", "n"], default="n")
+                    else:
+                        confirm = Prompt.ask("\nArchive this message?", choices=["y", "n"], default="n")
+                    
+                    if confirm == "y":
+                        archived_count = archive_emails(emails_to_archive)
+                        console.print(f"[green]✓ Archived {archived_count} message(s)[/green]")
+                        
+                        # Update cache by removing archived items
+                        # For now, just clear cache so next list will refresh
+                        CACHE_PATH.unlink(missing_ok=True)
+                        console.print("[dim]Cache cleared. Run 'smail' to refresh.[/dim]")
+                    else:
+                        console.print("[yellow]Archive cancelled[/yellow]")
+                        
+                except ValueError as e:
+                    console.print(f"[red]Error: {e}[/red]")
+            
             case 'reply':
                 if 'index' in parsed:
                     # Reply to specific message
@@ -1116,6 +1204,7 @@ def main():
                 console.print("  smail <index>            Read email/thread at index")
                 console.print("  smail <index>.<sub>      Read specific message in thread")
                 console.print("  smail <index>.last       Read last message in thread")
+                console.print("  smail <index> archive    Archive email/thread")
                 console.print("  smail <index> delete     Delete email/thread")
                 console.print("  smail <index> reply      Reply to email/thread")
                 console.print("  smail reply              Reply to most recent email")
