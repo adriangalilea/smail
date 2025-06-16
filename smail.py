@@ -746,7 +746,7 @@ def read_email(index):
 
 def render_message_panel(msg, thread_ref, depth, console):
     """Render a message as a Rich panel"""
-    content = Text()
+    content = Text(no_wrap=True)
 
     is_unread = not msg.get("is_read", True)
 
@@ -768,7 +768,7 @@ def render_message_panel(msg, thread_ref, depth, console):
     if is_unread:
         title = "[bold white]●[/bold white] " + title
 
-    panel = Panel(content, title=title, title_align="center", border_style="bold" if is_unread else "bright_black", padding=(0, 1), width=76, expand=False)
+    panel = Panel(content, title=title, title_align="center", border_style="bold" if is_unread else "bright_black", padding=(0, 1), expand=False)
 
     if depth > 0:
         padded = Padding(panel, (0, 0, 0, depth * 2))
