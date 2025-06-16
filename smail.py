@@ -345,9 +345,12 @@ def list_emails(max_emails=20, from_cache=False):
         # Connect to IMAP
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(LOGIN, password)
-        mail.select('INBOX')
         
-        # Search for emails
+        # Get emails from both INBOX and Sent Messages
+        all_ids = []
+        
+        # Search INBOX
+        mail.select('INBOX')
         if EMAIL:
             # Filter to/from specific email
             typ, to_data = mail.search(None, f'(TO "{EMAIL}")')
@@ -358,34 +361,61 @@ def list_emails(max_emails=20, from_cache=False):
             ensure(typ == 'OK', f"Search failed: {typ}")
             from_ids = from_data[0].split() if from_data[0] else []
             
-            # Combine and deduplicate
-            all_ids = list(set(to_ids + from_ids))
+            # Combine INBOX emails
+            inbox_ids = [(id, 'INBOX') for id in to_ids + from_ids]
+            all_ids.extend(inbox_ids)
         else:
             # Show all emails
             typ, data = mail.search(None, 'ALL')
             ensure(typ == 'OK', f"Search failed: {typ}")
-            all_ids = data[0].split() if data[0] else []
-        all_ids.sort(key=lambda x: int(x.decode() if isinstance(x, bytes) else x), reverse=True)
+            inbox_ids = [(id, 'INBOX') for id in (data[0].split() if data[0] else [])]
+            all_ids.extend(inbox_ids)
         
-        # Limit number of emails
-        email_ids = all_ids[:max_emails]
+        # Also search Sent Messages
+        try:
+            mail.select('"Sent Messages"')
+            if EMAIL:
+                typ, sent_data = mail.search(None, f'(FROM "{EMAIL}")')
+                if typ == 'OK' and sent_data[0]:
+                    sent_ids = [(id, 'Sent Messages') for id in sent_data[0].split()]
+                    all_ids.extend(sent_ids)
+            else:
+                typ, sent_data = mail.search(None, 'ALL')
+                if typ == 'OK' and sent_data[0]:
+                    sent_ids = [(id, 'Sent Messages') for id in sent_data[0].split()]
+                    all_ids.extend(sent_ids)
+        except:
+            # Sent folder might not exist or have different name
+            pass
+        
+        # Sort by ID (newest first) - extract ID from tuple
+        all_ids.sort(key=lambda x: int(x[0].decode() if isinstance(x[0], bytes) else x[0]), reverse=True)
+        
+        # Limit number of emails (before deduplication to ensure we get enough)
+        email_ids = all_ids[:max_emails * 2]  # Get extra to account for duplicates
         
         if not email_ids:
             console.print("[dim]No emails found[/dim]")
             return
         
         # Fetch all emails
-        emails_data = []
+        emails_by_msgid = {}  # Deduplicate by Message-ID
+        current_folder = None
         
-        for email_id in email_ids:
+        for email_id, folder in email_ids:
+            # Switch folder if needed
+            if folder != current_folder:
+                mail.select(f'"{folder}"' if ' ' in folder else folder)
+                current_folder = folder
+            
             # email_id might be bytes
             if isinstance(email_id, bytes):
                 email_id = email_id.decode()
             
             # Fetch email body and flags
             typ, msg_data = mail.fetch(email_id, '(FLAGS BODY.PEEK[])')
-            ensure(typ == 'OK', f"IMAP fetch failed: {typ}")
-            ensure(msg_data, "No message data returned")
+            if typ != 'OK' or not msg_data:
+                continue  # Skip failed fetches
             
             # Parse FLAGS and BODY from response
             flags = []
@@ -439,7 +469,7 @@ def list_emails(max_emails=20, from_cache=False):
             else:
                 body = msg.get_payload(decode=True).decode('utf-8', errors='replace')
             
-            emails_data.append({
+            email_data = {
                 'id': email_id,
                 'subject': subject,
                 'from': from_name,
@@ -449,11 +479,27 @@ def list_emails(max_emails=20, from_cache=False):
                 'in_reply_to': in_reply_to,
                 'references': references,
                 'body': body,
-                'is_read': '\\Seen' in flags
-            })
+                'is_read': '\\Seen' in flags,
+                'folder': folder
+            }
+            
+            # Deduplicate by Message-ID (prefer INBOX over Sent)
+            if message_id:
+                if message_id not in emails_by_msgid:
+                    emails_by_msgid[message_id] = email_data
+                elif folder == 'INBOX':
+                    # Prefer INBOX version over Sent for self-sent emails
+                    emails_by_msgid[message_id] = email_data
         
         mail.close()
         mail.logout()
+        
+        # Convert deduplicated emails to list and sort by date
+        emails_data = list(emails_by_msgid.values())
+        emails_data.sort(key=lambda x: parsedate_to_datetime(x['date']), reverse=True)
+        
+        # Limit to requested number after deduplication
+        emails_data = emails_data[:max_emails]
         
         # Build display items
         display_items = build_display_items(emails_data)
@@ -615,13 +661,10 @@ def read_email(index):
         for root in roots:
             build_tree(root)
     else:
-        # Display single message
+        # Display single message using same style as threads
         msg = item['message']
         console.print()
-        console.print(f"{msg['subject']} [dim]·[/dim] [dim cyan]{msg['from']}[/dim cyan] [dim]·[/dim] [dim]{format_date(msg['date'])}[/dim]")
-        console.print(Rule(style="dim"))
-        console.print()
-        console.print(msg['body'])
+        render_message_panel(msg, str(index), 0, console)
     
     # Mark messages as read
     emails_to_mark = []
@@ -707,25 +750,41 @@ def archive_emails(email_ids):
     
     mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
     mail.login(LOGIN, password)
-    mail.select('INBOX')
     
-    # Move each email to Archive
+    # Group emails by folder
+    emails_by_folder = {}
+    for item in email_ids:
+        if isinstance(item, tuple):
+            email_id, folder = item
+        else:
+            # Backward compatibility - assume INBOX
+            email_id, folder = item, 'INBOX'
+        
+        if folder not in emails_by_folder:
+            emails_by_folder[folder] = []
+        emails_by_folder[folder].append(email_id)
+    
+    # Archive from each folder
     archived_count = 0
-    for email_id in email_ids:
+    for folder, ids in emails_by_folder.items():
         try:
-            # Copy to Archive folder
-            typ, data = mail.copy(email_id, 'Archive')
-            if typ == 'OK':
-                # Mark as deleted in INBOX
-                mail.store(email_id, '+FLAGS', '\\Deleted')
-                archived_count += 1
-            else:
-                console.print(f"[yellow]Warning: Could not archive email {email_id}: {data}[/yellow]")
+            mail.select(f'"{folder}"' if ' ' in folder else folder)
+            for email_id in ids:
+                try:
+                    # Copy to Archive folder
+                    typ, data = mail.copy(email_id, 'Archive')
+                    if typ == 'OK':
+                        # Mark as deleted in source folder
+                        mail.store(email_id, '+FLAGS', '\\Deleted')
+                        archived_count += 1
+                    else:
+                        console.print(f"[yellow]Warning: Could not archive email {email_id} from {folder}: {data}[/yellow]")
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not archive email {email_id} from {folder}: {e}[/yellow]")
+            mail.expunge()
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not archive email {email_id}: {e}[/yellow]")
+            console.print(f"[yellow]Warning: Could not access folder {folder}: {e}[/yellow]")
     
-    # Expunge to remove from INBOX
-    mail.expunge()
     mail.close()
     mail.logout()
     
@@ -737,19 +796,35 @@ def delete_emails(email_ids):
     
     mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
     mail.login(LOGIN, password)
-    mail.select('INBOX')
     
-    # Mark each email for deletion
+    # Group emails by folder
+    emails_by_folder = {}
+    for item in email_ids:
+        if isinstance(item, tuple):
+            email_id, folder = item
+        else:
+            # Backward compatibility - assume INBOX
+            email_id, folder = item, 'INBOX'
+        
+        if folder not in emails_by_folder:
+            emails_by_folder[folder] = []
+        emails_by_folder[folder].append(email_id)
+    
+    # Delete from each folder
     deleted_count = 0
-    for email_id in email_ids:
+    for folder, ids in emails_by_folder.items():
         try:
-            mail.store(email_id, '+FLAGS', '\\Deleted')
-            deleted_count += 1
+            mail.select(f'"{folder}"' if ' ' in folder else folder)
+            for email_id in ids:
+                try:
+                    mail.store(email_id, '+FLAGS', '\\Deleted')
+                    deleted_count += 1
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not delete email {email_id} from {folder}: {e}[/yellow]")
+            mail.expunge()
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not delete email {email_id}: {e}[/yellow]")
+            console.print(f"[yellow]Warning: Could not access folder {folder}: {e}[/yellow]")
     
-    # Expunge to permanently delete
-    mail.expunge()
     mail.close()
     mail.logout()
     
@@ -1001,18 +1076,38 @@ def main():
                             # Delete entire thread
                             messages = item['messages']
                             for msg in messages:
-                                emails_to_delete.append(msg['id'])
+                                emails_to_delete.append((msg['id'], msg.get('folder', 'INBOX')))
                             console.print(f"Deleting thread: {messages[0]['subject']} ({len(messages)} messages)")
                         else:
                             # Delete single message
                             msg = item['message']
-                            emails_to_delete.append(msg['id'])
+                            emails_to_delete.append((msg['id'], msg.get('folder', 'INBOX')))
                             console.print(f"Deleting message: {msg['subject']} from {msg['from']}")
                     else:
-                        # Delete specific message in thread
+                        # Delete specific message in thread and all its children
                         msg = resolved['data']
-                        emails_to_delete.append(msg['id'])
-                        console.print(f"Deleting message: {msg['subject']} from {msg['from']}")
+                        thread = resolved['thread']
+                        messages = thread['messages']
+                        
+                        # Find all children of this message recursively
+                        def collect_children(parent_id, messages):
+                            children = []
+                            for m in messages:
+                                if m.get('in_reply_to') == parent_id:
+                                    children.append((m['id'], m.get('folder', 'INBOX')))
+                                    # Recursively get children of children
+                                    children.extend(collect_children(m['message_id'], messages))
+                            return children
+                        
+                        # Add the message itself
+                        emails_to_delete.append((msg['id'], msg.get('folder', 'INBOX')))
+                        # Add all its children
+                        emails_to_delete.extend(collect_children(msg['message_id'], messages))
+                        
+                        if len(emails_to_delete) > 1:
+                            console.print(f"Deleting message and {len(emails_to_delete)-1} replies: {msg['subject']} from {msg['from']}")
+                        else:
+                            console.print(f"Deleting message: {msg['subject']} from {msg['from']}")
                     
                     # Confirm deletion
                     if len(emails_to_delete) > 1:
@@ -1059,18 +1154,38 @@ def main():
                             # Archive entire thread
                             messages = item['messages']
                             for msg in messages:
-                                emails_to_archive.append(msg['id'])
+                                emails_to_archive.append((msg['id'], msg.get('folder', 'INBOX')))
                             console.print(f"Archiving thread: {messages[0]['subject']} ({len(messages)} messages)")
                         else:
                             # Archive single message
                             msg = item['message']
-                            emails_to_archive.append(msg['id'])
+                            emails_to_archive.append((msg['id'], msg.get('folder', 'INBOX')))
                             console.print(f"Archiving message: {msg['subject']} from {msg['from']}")
                     else:
-                        # Archive specific message in thread
+                        # Archive specific message in thread and all its children
                         msg = resolved['data']
-                        emails_to_archive.append(msg['id'])
-                        console.print(f"Archiving message: {msg['subject']} from {msg['from']}")
+                        thread = resolved['thread']
+                        messages = thread['messages']
+                        
+                        # Find all children of this message recursively
+                        def collect_children(parent_id, messages):
+                            children = []
+                            for m in messages:
+                                if m.get('in_reply_to') == parent_id:
+                                    children.append((m['id'], m.get('folder', 'INBOX')))
+                                    # Recursively get children of children
+                                    children.extend(collect_children(m['message_id'], messages))
+                            return children
+                        
+                        # Add the message itself
+                        emails_to_archive.append((msg['id'], msg.get('folder', 'INBOX')))
+                        # Add all its children
+                        emails_to_archive.extend(collect_children(msg['message_id'], messages))
+                        
+                        if len(emails_to_archive) > 1:
+                            console.print(f"Archiving message and {len(emails_to_archive)-1} replies: {msg['subject']} from {msg['from']}")
+                        else:
+                            console.print(f"Archiving message: {msg['subject']} from {msg['from']}")
                     
                     # Confirm archiving
                     if len(emails_to_archive) > 1:
