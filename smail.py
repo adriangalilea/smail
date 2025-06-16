@@ -203,6 +203,68 @@ def format_date(date_str):
     else:
         return dt.strftime("%b %d")
 
+def build_thread_index_map_with_parent_map(messages, parent_map):
+    """Build a map of message_id to thread index using pre-computed parent relationships"""
+    # Build children map from parent map
+    children_map = {}  # parent_id -> [child_messages]
+    id_to_msg = {m['message_id']: m for m in messages}
+    
+    for child_id, parent_id in parent_map.items():
+        if parent_id not in children_map:
+            children_map[parent_id] = []
+        children_map[parent_id].append(id_to_msg[child_id])
+    
+    # Sort children by date (newest first)
+    for parent_id in children_map:
+        children_map[parent_id].sort(
+            key=lambda x: parsedate_to_datetime(x['date']), 
+            reverse=True
+        )
+    
+    # Find the absolute newest message in the thread
+    newest_msg = max(messages, key=lambda x: parsedate_to_datetime(x['date']))
+    
+    # Build the index map
+    index_map = {}
+    
+    def assign_indices(msg, parent_path=[]):
+        """Recursively assign indices with newest message getting .0 path"""
+        msg_id = msg['message_id']
+        
+        # Get children sorted by date (newest first)
+        children = children_map.get(msg_id, [])
+        
+        # Check if any descendant is the newest message
+        def has_newest_descendant(m):
+            if m['message_id'] == newest_msg['message_id']:
+                return True
+            for child in children_map.get(m['message_id'], []):
+                if has_newest_descendant(child):
+                    return True
+            return False
+        
+        # Assign indices to children
+        for i, child in enumerate(children):
+            if has_newest_descendant(child):
+                # This branch contains the newest message, gets .0
+                child_path = parent_path + [0]
+            else:
+                # Other branches numbered by recency
+                child_path = parent_path + [i if has_newest_descendant(children[0]) else i + 1]
+            
+            index_map[child['message_id']] = child_path
+            assign_indices(child, child_path)
+    
+    # Find root message(s) - those not in parent_map
+    roots = [m for m in messages if m['message_id'] not in parent_map]
+    
+    # Assign index to roots
+    for root in roots:
+        index_map[root['message_id']] = []  # Root has empty path (displays as "0")
+        assign_indices(root, [])
+    
+    return index_map
+
 def build_thread_index_map(messages):
     """Build a map of message_id to thread index based on latest-first numbering"""
     # Build parent-child relationships
@@ -286,10 +348,26 @@ def build_display_items(emails):
             return msg_id
         
         msg = id_to_email[msg_id]
-        if not msg['in_reply_to']:
-            return msg_id
         
-        return find_root(msg['in_reply_to'], visited)
+        # First try in_reply_to
+        if msg['in_reply_to'] and msg['in_reply_to'] in id_to_email:
+            return find_root(msg['in_reply_to'], visited)
+        
+        # If parent not found, check References header
+        if msg.get('references'):
+            # References contains space-separated message IDs, extract them
+            ref_ids = []
+            for ref in msg['references'].split():
+                ref = ref.strip('<>')
+                if ref:
+                    ref_ids.append(ref)
+            
+            # Try to find any message from references in our set
+            for ref_id in reversed(ref_ids):  # Start from most recent
+                if ref_id in id_to_email and ref_id != msg_id:
+                    return find_root(ref_id, visited)
+        
+        return msg_id
     
     # Group by thread root
     threads = {}
@@ -332,7 +410,7 @@ def build_display_items(emails):
     
     return display_items
 
-def list_emails(max_emails=20, from_cache=False):
+def list_emails(max_emails=50, from_cache=False):
     """List emails with clean display"""
     if from_cache:
         cache_data = load_cache()
@@ -626,15 +704,38 @@ def read_email(index):
     if item['type'] == 'thread':
         # Display thread
         messages = item['messages']
-        thread_indices = item.get('thread_indices', {})
         
         # Build thread tree for proper parent-child relationships
         id_to_msg = {m['message_id']: m for m in messages}
-        roots = []
+        
+        # Find actual parent-child relationships using References
+        parent_map = {}  # child_id -> parent_id
         
         for msg in messages:
-            if not msg['in_reply_to'] or msg['in_reply_to'] not in id_to_msg:
+            msg_id = msg['message_id']
+            
+            # First try direct in_reply_to
+            if msg['in_reply_to'] and msg['in_reply_to'] in id_to_msg:
+                parent_map[msg_id] = msg['in_reply_to']
+            # Otherwise check References for a parent in our set
+            elif msg.get('references'):
+                ref_ids = []
+                for ref in msg['references'].split():
+                    ref = ref.strip('<>')
+                    if ref and ref in id_to_msg and ref != msg_id:
+                        ref_ids.append(ref)
+                # Use the last reference that exists in our set as parent
+                if ref_ids:
+                    parent_map[msg_id] = ref_ids[-1]
+        
+        # Find roots (messages with no parent in our set)
+        roots = []
+        for msg in messages:
+            if msg['message_id'] not in parent_map:
                 roots.append(msg)
+        
+        # Rebuild thread indices based on actual parent-child relationships
+        thread_indices = build_thread_index_map_with_parent_map(messages, parent_map)
         
         def format_thread_path(msg):
             """Format the thread path using computed indices"""
@@ -644,8 +745,8 @@ def read_email(index):
             return f"{index}.{'.'.join(map(str, path))}"
         
         def build_tree(msg, depth=0):
-            # Find children
-            children = [m for m in messages if m['in_reply_to'] == msg['message_id']]
+            # Find children using parent_map
+            children = [m for m in messages if parent_map.get(m['message_id']) == msg['message_id']]
             # Sort children by their thread index so .0 appears last (bottom)
             children.sort(key=lambda m: thread_indices.get(m['message_id'], []))
             
